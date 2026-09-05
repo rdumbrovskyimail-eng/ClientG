@@ -27,20 +27,18 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      # Активируем полное кэширование зависимостей и графа конфигурации
+      # Официальный экшен Gradle — автоматически кэширует зависимости и сборочные задачи
       - name: Setup Gradle & Cache
         uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-encryption-key: 'ClientG-Static-Deterministic-Key-2026'
 
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      # Запуск сборки без --no-daemon (демон переиспользует прогретую память JVM)
+      # Быстрая сборка Debug APK с переиспользованием демона
       - name: Build Debug APK
         run: ./gradlew :app:assembleDebug
 
-      # Привязываем имя артефакта к точному хэшу коммита (исключает путаницу с версиями)
+      # Прикрепляем готовый APK с привязкой к хэшу коммита
       - name: Upload Verified Debug APK
         uses: actions/upload-artifact@v4
         with:

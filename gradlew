@@ -63,9 +63,6 @@ if [ ! -s "$WRAPPER_JAR" ]; then
 fi
 # -----------------------------------------------------------------------------
 
-# Стандартные опции JVM
-DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
-
 CLASSPATH="$WRAPPER_JAR"
 
 # Определение пути к Java
@@ -87,9 +84,10 @@ else
     }
 fi
 
-# Запуск процесса Gradle Wrapper
+# Запуск процесса Gradle Wrapper (чистые флаги без внутренних кавычек)
 exec "$JAVACMD" \
-    $DEFAULT_JVM_OPTS \
+    -Xmx64m \
+    -Xms64m \
     $JAVA_OPTS \
     $GRADLE_OPTS \
     "-Dorg.gradle.appname=$APP_BASE_NAME" \

@@ -14,7 +14,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.ripple
@@ -24,6 +23,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
@@ -38,6 +39,30 @@ private val GptTextPlaceholder = Color(0xFF8E8E93)  // Текст подсказ
 private val GptButtonInactive = Color(0xFF424242)   // Фон неактивной кнопки отправки
 private val GptIconInactive = Color(0xFF6E6E6E)     // Иконка неактивной кнопки отправки
 private val GptIconPlus = Color(0xFFD1D1D1)         // Цвет плюсика
+
+// Легковесный вектор стрелочки вверх (копия ArrowUpward без подключения 20 МБ библиотек)
+private val ArrowUpwardIcon: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "ArrowUpward",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).apply {
+        path(fill = SolidColor(Color.White)) {
+            moveTo(4f, 12f)
+            lineToRelative(1.41f, 1.41f)
+            lineTo(11f, 7.83f)
+            verticalLineTo(20f)
+            horizontalLineToRelative(2f)
+            verticalLineTo(7.83f)
+            lineToRelative(5.58f, 5.59f)
+            lineTo(20f, 12f)
+            lineToRelative(-8f, -8f)
+            close()
+        }
+    }.build()
+}
 
 @Composable
 fun ChatGptScreen(
@@ -186,7 +211,7 @@ fun ChatGptInputBar(
             contentAlignment = Alignment.Center
         ) {
             Icon(
-                imageVector = Icons.Default.ArrowUpward,
+                imageVector = ArrowUpwardIcon,
                 contentDescription = "Отправить сообщение",
                 tint = sendButtonIconColor,
                 modifier = Modifier.size(20.dp)

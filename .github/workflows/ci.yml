@@ -1,0 +1,47 @@
+name: CI - Build ClientG APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: # Возможность запустить сборку вручную кнопкой
+
+# Отменяет предыдущую сборку, если в ту же ветку отправлен новый коммит (экономит минуты CI)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      # Официальный экшен Gradle — автоматически кэширует зависимости
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Гарантирует права на выполнение скрипта в среде Linux
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      # Запуск сборки: наш скрипт gradlew на лету скачает wrapper-jar через bootstrap-хук
+      - name: Build Debug APK
+        run: ./gradlew :app:assembleDebug --no-daemon
+
+      # Выкладывает собранный APK в раздел Artifacts
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClientG-Debug-APK
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 7

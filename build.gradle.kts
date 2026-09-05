@@ -1,34 +1,13 @@
 plugins {
-    alias(libs.plugins.kotlin.jvm)
-    alias(libs.plugins.kotlin.serialization)
-    application
+    // Регистрация плагинов без применения к корню (apply false).
+    // Модуль :app активирует их через алиасы из каталога libs.versions.toml.
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.kotlin.android) apply false
+    alias(libs.plugins.kotlin.compose) apply false
+    alias(libs.plugins.kotlin.serialization) apply false
 }
 
-dependencies {
-    // Асинхронность и сериализация
-    implementation(libs.kotlinx.coroutines.core)
-    implementation(libs.kotlinx.serialization.json)
-
-    // Движок Ktor Client для вызовов Gemini 3.8 Flash
-    implementation(libs.ktor.client.core)
-    implementation(libs.ktor.client.cio)
-    implementation(libs.ktor.client.content.negotiation)
-    implementation(libs.ktor.serialization.kotlinx.json)
-
-    // Официальный SDK Google GenAI
-    implementation(libs.google.genai)
-}
-
-application {
-    mainClass.set("MainKt")
-}
-
-kotlin {
-    jvmToolchain(21)
-}
-
-tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    compilerOptions {
-        freeCompilerArgs.add("-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi")
-    }
+// Задача очистки сборочных артефактов по современному API Gradle 9.x
+tasks.register<Delete>("clean") {
+    delete(rootProject.layout.buildDirectory)
 }

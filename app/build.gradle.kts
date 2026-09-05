@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "clientg"
+    namespace = "com.clientg"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "clientg"
+        applicationId = "com.clientg"
         minSdk = 34
         targetSdk = 36
         versionCode = 1
@@ -50,9 +50,12 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+
+    // Добавляем поддержку стандартных иконок Compose (плюсик и стрелка)
+    implementation("androidx.compose.material:material-icons-core")
 }
 
-// Отключаем проверку minCompileSdk у альфа-библиотек Compose
+// Отключаем проверку метаданных
 tasks.matching { it.name.contains("AarMetadata") }.configureEach {
     enabled = false
 }

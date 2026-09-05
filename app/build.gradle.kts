@@ -29,6 +29,10 @@ android {
                 "proguard-rules.pro"
             )
         }
+        debug {
+            // Отключаем ресурсоемкое сжатие PNG при сборке для отладки
+            isCrunchPngs = false
+        }
     }
 
     compileOptions {
@@ -38,6 +42,10 @@ android {
 
     buildFeatures {
         compose = true
+        // Отключаем неиспользуемые генераторы, ускоряя проверку ресурсов
+        buildConfig = false
+        resValues = false
+        shaders = false
     }
 }
 
@@ -50,8 +58,6 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
-
-    // Добавляем поддержку стандартных иконок Compose (плюсик и стрелка)
     implementation("androidx.compose.material:material-icons-core")
 }
 

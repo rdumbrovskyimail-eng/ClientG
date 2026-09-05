@@ -1,4 +1,4 @@
-package clientg
+package com.clientg
 
 import android.graphics.Color as AndroidColor
 import android.os.Bundle

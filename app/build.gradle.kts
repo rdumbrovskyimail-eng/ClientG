@@ -51,3 +51,8 @@ dependencies {
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
 }
+
+// Отключаем проверку minCompileSdk у альфа-библиотек Compose
+tasks.matching { it.name.contains("AarMetadata") }.configureEach {
+    enabled = false
+}

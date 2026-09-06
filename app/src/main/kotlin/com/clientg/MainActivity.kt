@@ -12,7 +12,6 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.core.content.IntentCompat
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import com.clientg.presentation.ChatViewModel
 import android.graphics.Color as AndroidColor
 
@@ -22,7 +21,7 @@ import android.graphics.Color as AndroidColor
  */
 class MainActivity : ComponentActivity() {
 
-    // Инициализация ViewModel через стандартную фабрику AndroidViewModelFactory
+    // Инициализация ViewModel через AndroidViewModelFactory (с поддержкой @JvmOverloads)
     private val chatViewModel: ChatViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,8 +39,10 @@ class MainActivity : ComponentActivity() {
         // 3. Аппаратная конфигурация окна под дисплей Samsung Galaxy S23 Ultra
         configureDisplayWindow()
 
-        // 4. Обработка входящих данных из системного меню «Поделиться»
-        handleIncomingIntent(intent)
+        // 4. Обработка входящих данных только при первичном запуске (защита от дублирования при повороте)
+        if (savedInstanceState == null) {
+            handleIncomingIntent(intent)
+        }
 
         // 5. Запуск UI-слоя Jetpack Compose
         setContent {
@@ -72,6 +73,8 @@ class MainActivity : ComponentActivity() {
                 if (!sharedText.isNullOrBlank()) {
                     chatViewModel.onInputTextChanged(sharedText)
                 }
+                // Сбрасываем действие, предотвращая повторную обработку тем же экземпляром
+                intent.action = null
             }
 
             Intent.ACTION_SEND_MULTIPLE -> {
@@ -83,6 +86,7 @@ class MainActivity : ComponentActivity() {
                 fileUris?.forEach { uri ->
                     chatViewModel.onAttachFileUri(uri)
                 }
+                intent.action = null
             }
         }
     }
@@ -90,7 +94,7 @@ class MainActivity : ComponentActivity() {
     /**
      * Конфигурация параметров дисплея и оконного менеджера под Samsung S23 Ultra:
      * - Отключение системных разделителей и принудительного контраста навигации;
-     * - Сквозное заполнение зоны вокруг фронтальной камеры (Cutout Short Edges);
+     * - Корректное сквозное заполнение зоны вокруг фронтальной камеры (Cutout Short Edges);
      * - Принудительно белые иконки статусной строки на черном фоне.
      */
     private fun configureDisplayWindow() {
@@ -99,10 +103,13 @@ class MainActivity : ComponentActivity() {
         window.isNavigationBarContrastEnforced = false
         window.isStatusBarContrastEnforced = false
 
-        window.attributes.layoutInDisplayCutoutMode =
+        // Корректное переприсвоение LayoutParams для вызова dispatchWindowAttributesChanged()
+        val params = window.attributes
+        params.layoutInDisplayCutoutMode =
             WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        window.attributes = params
 
-        val insetsController = WindowInsetsControllerCompat(window, window.decorView)
+        val insetsController = WindowCompat.getInsetsController(window, window.decorView)
         insetsController.isAppearanceLightStatusBars = false
         insetsController.isAppearanceLightNavigationBars = false
     }

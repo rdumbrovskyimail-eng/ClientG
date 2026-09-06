@@ -875,12 +875,22 @@ private fun ChatMessageItem(
                 }
 
                 if (message.text.isNotEmpty()) {
-                    SelectionContainer {
+                    if (message.isStreaming) {
+                        // Во время стриминга рендерим без SelectionContainer, чтобы избежать IndexOutOfBoundsException
                         StreamingMarkdownContent(
                             text = message.text,
                             citations = message.citations,
                             onOpenUrl = onOpenUrl
                         )
+                    } else {
+                        // После завершения генерации включаем полноценное выделение и копирование
+                        SelectionContainer {
+                            StreamingMarkdownContent(
+                                text = message.text,
+                                citations = message.citations,
+                                onOpenUrl = onOpenUrl
+                            )
+                        }
                     }
                 }
 

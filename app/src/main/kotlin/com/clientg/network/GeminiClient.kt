@@ -1,6 +1,7 @@
 package com.clientg.network
 
 import android.net.TrafficStats
+import android.os.SystemClock
 import io.ktor.client.*
 import io.ktor.client.engine.cio.*
 import io.ktor.client.plugins.*
@@ -26,6 +27,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.Closeable
 import java.io.IOException
+import java.net.URI
 import java.time.Duration
 import java.time.Instant
 import java.time.format.DateTimeFormatter
@@ -174,7 +176,8 @@ internal data class ToolDto(
 
 @Serializable
 internal data class GenerationConfigDto(
-    val maxOutputTokens: Int = 8192,
+    // Дефект №1: 65536 токенов для полного окна генерации Gemini Flash при ThinkingLevel.HIGH
+    val maxOutputTokens: Int = 65536,
     @SerialName("thinkingConfig") val thinkingConfig: ThinkingConfigDto
 )
 
@@ -304,7 +307,8 @@ private class TrafficStatsElement(private val tag: Int) : ThreadContextElement<I
     }
 
     override fun restoreThreadContext(context: CoroutineContext, oldState: Int) {
-        if (oldState != 0) {
+        // Дефект №7: getThreadStatsTag() возвращает -1 или 0, если тег не был задан
+        if (oldState > 0) {
             TrafficStats.setThreadStatsTag(oldState)
         } else {
             TrafficStats.clearThreadStatsTag()
@@ -344,44 +348,111 @@ class GeminiClient(
                 }
             }
 
-            install(HttpRequestRetry) {
-                maxRetries = 3
-                retryIf { _, response ->
-                    response.status == HttpStatusCode.ServiceUnavailable ||
-                    response.status == HttpStatusCode.GatewayTimeout
-                }
-                exponentialDelay(base = 2.0, maxDelayMs = 8_000)
-            }
-
+            // Дефект №2: RFC 9110 — исключен автоматический HttpRequestRetry на неидемпотентный потоковый POST
             install(HttpTimeout) {
-                // В Ktor 3.x константа находится в HttpTimeoutConfig
                 requestTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
                 socketTimeoutMillis = 180_000
                 connectTimeoutMillis = 15_000
             }
         }
 
+        // Дефект №9: Однопроходное экранирование XML атрибутов с фильтрацией недопустимых символов XML 1.0
         private fun escapeXmlAttribute(value: String): String {
-            return value.replace("&", "&amp;")
-                .replace("\"", "&quot;")
-                .replace("'", "&apos;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
+            val sb = StringBuilder(value.length + 16)
+            for (i in 0 until value.length) {
+                when (val c = value[i]) {
+                    '&' -> sb.append("&amp;")
+                    '"' -> sb.append("&quot;")
+                    '\'' -> sb.append("&apos;")
+                    '<' -> sb.append("&lt;")
+                    '>' -> sb.append("&gt;")
+                    in '\u0000'..'\u001F' -> {
+                        if (c == '\t' || c == '\n' || c == '\r') {
+                            sb.append(c)
+                        }
+                    }
+                    else -> sb.append(c)
+                }
+            }
+            return sb.toString()
         }
 
+        // Дефект №9: Однопроходное экранирование текста XML без GC-трешинга
         private fun escapeXmlText(value: String): String {
-            return value.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
+            val sb = StringBuilder(value.length + 32)
+            for (i in 0 until value.length) {
+                when (val c = value[i]) {
+                    '&' -> sb.append("&amp;")
+                    '<' -> sb.append("&lt;")
+                    '>' -> sb.append("&gt;")
+                    in '\u0000'..'\u001F' -> {
+                        if (c == '\t' || c == '\n' || c == '\r') {
+                            sb.append(c)
+                        }
+                    }
+                    else -> sb.append(c)
+                }
+            }
+            return sb.toString()
+        }
+
+        // Дефект №10: Нормализация URL источников поискового заземления (RFC 3986 / RFC 6454)
+        private fun normalizeUrl(rawUrl: String): String {
+            val trimmed = rawUrl.trim()
+            return runCatching {
+                val uri = URI(trimmed)
+                val scheme = (uri.scheme ?: "https").lowercase(Locale.US)
+                val host = (uri.host ?: "").lowercase(Locale.US)
+                val port = if (uri.port == -1 || (scheme == "https" && uri.port == 443) || (scheme == "http" && uri.port == 80)) {
+                    ""
+                } else {
+                    ":${uri.port}"
+                }
+                var path = uri.rawPath ?: ""
+                if (path.endsWith('/') && path.length > 1) {
+                    path = path.dropLast(1)
+                }
+                val query = uri.rawQuery?.split('&')?.filterNot {
+                    it.startsWith("utm_", ignoreCase = true) || it.startsWith("gclid", ignoreCase = true)
+                }?.joinToString("&")?.takeIf { it.isNotEmpty() }
+
+                val queryPart = if (query != null) "?$query" else ""
+                "$scheme://$host$port$path$queryPart"
+            }.getOrDefault(trimmed.trimEnd('/'))
+        }
+
+        // Дефект №3: Конвертер смещений из байтов UTF-8 (Google API) в индексы кодовых единиц UTF-16 (Kotlin String)
+        private fun utf8ByteOffsetToCharIndex(text: String, byteOffset: Int): Int {
+            if (byteOffset <= 0) return 0
+            var currentBytes = 0
+            var charIndex = 0
+            val length = text.length
+            while (charIndex < length && currentBytes < byteOffset) {
+                val codePoint = text.codePointAt(charIndex)
+                val bytesForCodePoint = when {
+                    codePoint <= 0x7F -> 1
+                    codePoint <= 0x7FF -> 2
+                    codePoint <= 0xFFFF -> 3
+                    else -> 4
+                }
+                if (currentBytes + bytesForCodePoint > byteOffset) {
+                    break
+                }
+                currentBytes += bytesForCodePoint
+                charIndex += Character.charCount(codePoint)
+            }
+            return charIndex.coerceIn(0, length)
         }
     }
 
+    // Дефект №5: coerceInputValues = true для устойчивости к null/неизвестным значениям полей с дефолтами
     @OptIn(ExperimentalSerializationApi::class)
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true
         encodeDefaults = true
         explicitNulls = false
+        coerceInputValues = true
     }
 
     fun streamContent(
@@ -403,7 +474,8 @@ class GeminiClient(
         }
 
         emit(GeminiStreamEvent.Connecting)
-        val startTime = System.currentTimeMillis()
+        // Дефект №8: Монотонный аппаратный таймер вместо астрономического currentTimeMillis
+        val startTime = SystemClock.elapsedRealtime()
         val endpointUrl = "$BASE_URL/$modelName:streamGenerateContent?alt=sse"
 
         // 1. Формирование истории диалога
@@ -415,8 +487,9 @@ class GeminiClient(
                     val safeContent = escapeXmlText(att.content)
                     add(PartDto(text = "<attachment name=\"$safeName\">\n$safeContent\n</attachment>"))
                 }
-                if (msg.text.isNotBlank() || msg.thoughtSignature != null) {
-                    add(PartDto(text = msg.text.takeIf { it.isNotBlank() }, thoughtSignature = msg.thoughtSignature))
+                // Дефект №12: Недопустимо отправлять PartDto без поля data (text) при наличии thoughtSignature
+                if (msg.text.isNotBlank()) {
+                    add(PartDto(text = msg.text, thoughtSignature = msg.thoughtSignature))
                 }
             }
             if (historyParts.isNotEmpty()) {
@@ -475,7 +548,7 @@ class GeminiClient(
             systemInstruction = systemDto,
             contents = sanitizedContents,
             generationConfig = GenerationConfigDto(
-                maxOutputTokens = 8192,
+                maxOutputTokens = 65536,
                 thinkingConfig = ThinkingConfigDto(
                     thinkingLevel = thinkingLevel.apiValue,
                     includeThoughts = true
@@ -501,9 +574,12 @@ class GeminiClient(
         val discoveredSourceUrls = mutableSetOf<String>()
         val discoveredCitations = mutableSetOf<InlineCitation>()
         val accumulatedGroundingChunks = mutableListOf<GroundingChunkDto>()
+        val accumulatedContentText = StringBuilder()
         var emittedSearchEntryPoint = false
         var finalFinishReason = FinishReason.UNKNOWN
         var latestThoughtSignature: String? = null
+        var hasReceivedTerminalFinishReason = false
+        var isStreamGracefullyClosed = false
 
         // 6. Сетевой вызов
         try {
@@ -556,7 +632,11 @@ class GeminiClient(
 
                 // 7. Обработка неделимого W3C JSON-пакета
                 suspend fun processCompleteSsePayload(dataPayload: String) {
-                    if (dataPayload.isEmpty() || dataPayload == "[DONE]") return
+                    if (dataPayload.isEmpty()) return
+                    if (dataPayload == "[DONE]") {
+                        isStreamGracefullyClosed = true
+                        return
+                    }
 
                     val chunk = try {
                         json.decodeFromString(GeminiResponseChunk.serializer(), dataPayload)
@@ -594,6 +674,8 @@ class GeminiClient(
                     val candidate = chunk.candidates?.firstOrNull()
 
                     candidate?.finishReason?.let { reason ->
+                        hasReceivedTerminalFinishReason = true
+                        isStreamGracefullyClosed = true
                         finalFinishReason = when (reason) {
                             "STOP" -> FinishReason.STOP
                             "MAX_TOKENS" -> FinishReason.MAX_TOKENS
@@ -614,10 +696,13 @@ class GeminiClient(
                             }
                         }
 
+                        // Дефект №6: Накопление источников в кумулятивный пул по контракту Google Grounding
                         val currentChunkList = meta.groundingChunks ?: emptyList()
                         if (currentChunkList.isNotEmpty()) {
-                            if (currentChunkList.size >= accumulatedGroundingChunks.size) {
+                            if (currentChunkList.size > accumulatedGroundingChunks.size) {
                                 accumulatedGroundingChunks.clear()
+                                accumulatedGroundingChunks.addAll(currentChunkList)
+                            } else if (!accumulatedGroundingChunks.containsAll(currentChunkList)) {
                                 accumulatedGroundingChunks.addAll(currentChunkList)
                             }
 
@@ -625,7 +710,8 @@ class GeminiClient(
                             currentChunkList.forEach { chunkItem ->
                                 val web = chunkItem.web ?: return@forEach
                                 val uri = web.uri ?: return@forEach
-                                if (discoveredSourceUrls.add(uri)) {
+                                val normalized = normalizeUrl(uri)
+                                if (discoveredSourceUrls.add(normalized)) {
                                     newSourcesBatch.add(
                                         GroundingSource(
                                             title = web.title?.takeIf { it.isNotBlank() } ?: uri,
@@ -639,12 +725,17 @@ class GeminiClient(
                             }
                         }
 
+                        // Дефект №3 и №6: Конвертация UTF-8 смещений и сопоставление по сквозному accumulatedGroundingChunks
                         meta.groundingSupports?.let { supports ->
-                            val chunkPool = if (currentChunkList.isNotEmpty()) currentChunkList else accumulatedGroundingChunks
+                            val chunkPool = accumulatedGroundingChunks
                             if (chunkPool.isNotEmpty()) {
+                                val currentTextSnapshot = accumulatedContentText.toString()
                                 val citations = supports.flatMap { sup ->
                                     val seg = sup.segment ?: return@flatMap emptyList<InlineCitation>()
                                     val indices = sup.groundingChunkIndices ?: return@flatMap emptyList<InlineCitation>()
+
+                                    val startCharIndex = utf8ByteOffsetToCharIndex(currentTextSnapshot, seg.startIndex)
+                                    val endCharIndex = utf8ByteOffsetToCharIndex(currentTextSnapshot, seg.endIndex)
 
                                     indices.mapNotNull { srcIndex ->
                                         val chunkItem = chunkPool.getOrNull(srcIndex) ?: return@mapNotNull null
@@ -652,8 +743,8 @@ class GeminiClient(
                                         val uri = web.uri ?: return@mapNotNull null
 
                                         InlineCitation(
-                                            startIndex = seg.startIndex,
-                                            endIndex = seg.endIndex,
+                                            startIndex = startCharIndex,
+                                            endIndex = endCharIndex,
                                             source = GroundingSource(
                                                 title = web.title?.takeIf { it.isNotBlank() } ?: uri,
                                                 url = uri
@@ -691,7 +782,7 @@ class GeminiClient(
                         if (part.thought == true) {
                             if (!isThinkingPhase) {
                                 isThinkingPhase = true
-                                currentThinkingStartTime = System.currentTimeMillis()
+                                currentThinkingStartTime = SystemClock.elapsedRealtime()
                                 emit(GeminiStreamEvent.ThinkingStarted)
                             }
                             totalThoughtChars += text.length
@@ -699,13 +790,14 @@ class GeminiClient(
                         } else {
                             if (isThinkingPhase) {
                                 isThinkingPhase = false
-                                val duration = (System.currentTimeMillis() - currentThinkingStartTime).coerceAtLeast(0L)
+                                val duration = (SystemClock.elapsedRealtime() - currentThinkingStartTime).coerceAtLeast(0L)
                                 emit(GeminiStreamEvent.ThinkingCompleted(duration, totalThoughtChars))
                             }
                             if (!hasContentStarted) {
                                 hasContentStarted = true
                                 emit(GeminiStreamEvent.ContentStarted)
                             }
+                            accumulatedContentText.append(text)
                             emit(GeminiStreamEvent.ContentDelta(text))
                         }
                     }
@@ -759,12 +851,21 @@ class GeminiClient(
                     processCompleteSsePayload(remainingPayload)
                 }
 
+                // Дефект №11: Защита от тихого обрыва сокета — выброс сетевого исключения, если соединение закрылось до терминального чанка
+                if (!isStreamGracefullyClosed && !hasReceivedTerminalFinishReason) {
+                    throw GeminiApiException(
+                        httpStatusCode = HttpStatusCode.GatewayTimeout,
+                        googleErrorCode = "PREMATURE_STREAM_DISCONNECT",
+                        userFriendlyMessage = "Сетевое соединение прервалось до завершения ответа. Повторите запрос."
+                    )
+                }
+
                 if (isThinkingPhase) {
-                    val duration = (System.currentTimeMillis() - currentThinkingStartTime).coerceAtLeast(0L)
+                    val duration = (SystemClock.elapsedRealtime() - currentThinkingStartTime).coerceAtLeast(0L)
                     emit(GeminiStreamEvent.ThinkingCompleted(duration, totalThoughtChars))
                 }
 
-                val totalDuration = (System.currentTimeMillis() - startTime).coerceAtLeast(0L)
+                val totalDuration = (SystemClock.elapsedRealtime() - startTime).coerceAtLeast(0L)
                 emit(GeminiStreamEvent.Completed(finalFinishReason, totalDuration, latestThoughtSignature))
             }
         } catch (e: CancellationException) {

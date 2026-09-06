@@ -17,8 +17,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.io.InputStream
 import java.util.UUID
 
@@ -37,6 +35,7 @@ data class UiChatMessage(
     val thinkingDurationMs: Long = 0L,
     val isThinkingActive: Boolean = false,
     val isThinkingExpanded: Boolean = false,
+    val hasThoughts: Boolean = false, // Постоянный якорь: карточка мыслей больше никогда не исчезает
     // Блок поиска Google Search Grounding
     val searchQueries: List<String> = emptyList(),
     val sources: List<GroundingSource> = emptyList(),
@@ -53,9 +52,7 @@ data class ChatUiState(
     val inputText: String = "",
     val attachedFiles: List<TextAttachment> = emptyList(),
     val isGenerating: Boolean = false,
-    // Дефолт false для исключения мгновенных 429 ошибок на Free Tier ключах
     val enableSearch: Boolean = false,
-    // Рекомендованный Google дефолтный уровень для gemini-3.8-flash
     val thinkingLevel: ThinkingLevel = ThinkingLevel.MEDIUM,
     val apiKey: String = "",
     val isApiKeyDialogOpen: Boolean = false,
@@ -97,25 +94,23 @@ class ChatViewModel @JvmOverloads constructor(
 
     private var generationJob: Job? = null
     private var countdownJob: Job? = null
+    private var activeTypewriter: TypewriterEngine? = null
 
     @Volatile
     private var securePrefs: SharedPreferences? = null
-    private val prefsMutex = Mutex()
 
     @Volatile
     private var cachedApiKey: String = ""
 
-    private suspend fun getSecurePrefs(): SharedPreferences = withContext(Dispatchers.IO) {
-        securePrefs ?: prefsMutex.withLock {
-            securePrefs ?: createSafeSharedPreferences(getApplication<Application>()).also {
-                securePrefs = it
-            }
+    private fun getSecurePrefs(context: Context): SharedPreferences {
+        return securePrefs ?: synchronized(this) {
+            securePrefs ?: createSafeSharedPreferences(context).also { securePrefs = it }
         }
     }
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
-            val prefs = getSecurePrefs()
+            val prefs = getSecurePrefs(getApplication())
             val savedKey = prefs.getString(PREF_KEY_API_KEY, "") ?: ""
             cachedApiKey = savedKey
             _uiState.update { it.copy(apiKey = savedKey) }
@@ -161,7 +156,7 @@ class ChatViewModel @JvmOverloads constructor(
         val trimmed = newKey.trim()
         cachedApiKey = trimmed
         viewModelScope.launch(Dispatchers.IO) {
-            getSecurePrefs().edit().putString(PREF_KEY_API_KEY, trimmed).apply()
+            getSecurePrefs(getApplication()).edit().putString(PREF_KEY_API_KEY, trimmed).apply()
             _uiState.update {
                 it.copy(
                     apiKey = trimmed,
@@ -316,7 +311,7 @@ class ChatViewModel @JvmOverloads constructor(
     }
 
     // ================================================================
-    // Оркестрация стриминга с тактовой буферизацией под 120 FPS
+    // Оркестрация стриминга с интеграцией TypewriterEngine
     // ================================================================
 
     fun onSendMessage() {
@@ -350,12 +345,14 @@ class ChatViewModel @JvmOverloads constructor(
             id = assistantMessageId,
             role = ChatRole.MODEL,
             isStreaming = true,
-            isThinkingActive = (state.thinkingLevel != ThinkingLevel.LOW),
-            isThinkingExpanded = (state.thinkingLevel != ThinkingLevel.LOW)
+            isThinkingActive = true,
+            isThinkingExpanded = true,
+            hasThoughts = true
         )
 
+        // Предотвращение обрыва генерации: сохраняем thoughtSignature от предыдущих ходов!
         val sanitizedHistory = state.messages.mapNotNull { msg ->
-            if (msg.text.isBlank() && msg.attachments.isEmpty()) {
+            if (msg.text.isBlank() && msg.attachments.isEmpty() && msg.thoughtSignature == null) {
                 null
             } else {
                 ChatMessage(
@@ -415,12 +412,13 @@ class ChatViewModel @JvmOverloads constructor(
             id = assistantMessageId,
             role = ChatRole.MODEL,
             isStreaming = true,
-            isThinkingActive = (state.thinkingLevel != ThinkingLevel.LOW),
-            isThinkingExpanded = (state.thinkingLevel != ThinkingLevel.LOW)
+            isThinkingActive = true,
+            isThinkingExpanded = true,
+            hasThoughts = true
         )
 
         val sanitizedHistory = messagesHistory.mapNotNull { msg ->
-            if (msg.text.isBlank() && msg.attachments.isEmpty()) {
+            if (msg.text.isBlank() && msg.attachments.isEmpty() && msg.thoughtSignature == null) {
                 null
             } else {
                 ChatMessage(
@@ -462,49 +460,50 @@ class ChatViewModel @JvmOverloads constructor(
         _uiEffects.trySend(ChatUiSideEffect.ScrollToBottom)
         _uiEffects.trySend(ChatUiSideEffect.HapticLightTick)
 
-        generationJob = viewModelScope.launch(Dispatchers.Default) {
-            val thoughtBuffer = StringBuilder()
-            val contentBuffer = StringBuilder()
-            var lastUiFlushTime = 0L
-
-            suspend fun flushDeltasToUi() {
-                if (thoughtBuffer.isEmpty() && contentBuffer.isEmpty()) return
-
-                val thoughtDelta = thoughtBuffer.toString()
-                val contentDelta = contentBuffer.toString()
-                thoughtBuffer.setLength(0)
-                contentBuffer.setLength(0)
-                lastUiFlushTime = SystemClock.elapsedRealtime()
-
-                withContext(Dispatchers.Main.immediate) {
+        generationJob = viewModelScope.launch(Dispatchers.IO) {
+            // Инициализация кадрового интерполятора
+            val typewriter = TypewriterEngine(
+                onFrame = { thoughtDelta, contentDelta ->
+                    if (thoughtDelta.isEmpty() && contentDelta.isEmpty()) return@TypewriterEngine
                     _uiState.update { currentState ->
                         val messages = currentState.messages
-                        val lastIdx = messages.lastIndex
-                        if (lastIdx >= 0 && messages[lastIdx].id == assistantMessageId) {
-                            val currentTarget = messages[lastIdx]
-                            val updatedTarget = currentTarget.copy(
-                                thoughtText = if (thoughtDelta.isNotEmpty()) currentTarget.thoughtText + thoughtDelta else currentTarget.thoughtText,
-                                text = if (contentDelta.isNotEmpty()) currentTarget.text + contentDelta else currentTarget.text
+                        val idx = messages.indexOfLast { it.id == assistantMessageId }
+                        if (idx == -1) return@update currentState
+
+                        val target = messages[idx]
+                        val updated = target.copy(
+                            thoughtText = if (thoughtDelta.isNotEmpty()) target.thoughtText + thoughtDelta else target.thoughtText,
+                            text = if (contentDelta.isNotEmpty()) target.text + contentDelta else target.text,
+                            hasThoughts = target.hasThoughts || thoughtDelta.isNotEmpty() || target.thoughtText.isNotEmpty()
+                        )
+                        val newMessages = ArrayList(messages)
+                        newMessages[idx] = updated
+                        currentState.copy(messages = newMessages)
+                    }
+                },
+                onComplete = {
+                    _uiState.update { currentState ->
+                        val messages = currentState.messages
+                        val idx = messages.indexOfLast { it.id == assistantMessageId }
+                        if (idx == -1) {
+                            currentState.copy(isGenerating = false)
+                        } else {
+                            val target = messages[idx]
+                            val updated = target.copy(
+                                isStreaming = false,
+                                isThinkingActive = false
                             )
                             val newMessages = ArrayList(messages)
-                            newMessages[lastIdx] = updatedTarget
-                            currentState.copy(messages = newMessages)
-                        } else {
-                            val updatedList = messages.map { msg ->
-                                if (msg.id == assistantMessageId) {
-                                    msg.copy(
-                                        thoughtText = if (thoughtDelta.isNotEmpty()) msg.thoughtText + thoughtDelta else msg.thoughtText,
-                                        text = if (contentDelta.isNotEmpty()) msg.text + contentDelta else msg.text
-                                    )
-                                } else {
-                                    msg
-                                }
-                            }
-                            currentState.copy(messages = updatedList)
+                            newMessages[idx] = updated
+                            currentState.copy(messages = newMessages, isGenerating = false)
                         }
                     }
+                    _uiEffects.trySend(ChatUiSideEffect.HapticGenerationFinished)
+                    _uiEffects.trySend(ChatUiSideEffect.ScrollToBottom)
                 }
-            }
+            )
+            activeTypewriter = typewriter
+            typewriter.start(this)
 
             try {
                 activeClient.streamContent(
@@ -515,24 +514,18 @@ class ChatViewModel @JvmOverloads constructor(
                     enableSearch = enableSearch
                 ).collect { event ->
                     when (event) {
-                        is GeminiStreamEvent.ThinkingDelta -> {
-                            thoughtBuffer.append(event.text)
-                            val now = SystemClock.elapsedRealtime()
-                            if (now - lastUiFlushTime >= UI_BATCH_INTERVAL_MS) {
-                                flushDeltasToUi()
+                        is GeminiStreamEvent.ThinkingStarted -> {
+                            withContext(Dispatchers.Main.immediate) {
+                                handleDiscreteEvent(assistantMessageId, event)
                             }
                         }
 
-                        is GeminiStreamEvent.ContentDelta -> {
-                            contentBuffer.append(event.text)
-                            val now = SystemClock.elapsedRealtime()
-                            if (now - lastUiFlushTime >= UI_BATCH_INTERVAL_MS) {
-                                flushDeltasToUi()
-                            }
+                        is GeminiStreamEvent.ThinkingDelta -> {
+                            typewriter.enqueueThought(event.text)
                         }
 
                         is GeminiStreamEvent.ThinkingCompleted -> {
-                            flushDeltasToUi()
+                            typewriter.markThinkingEnded()
                             withContext(Dispatchers.Main.immediate) {
                                 handleDiscreteEvent(assistantMessageId, event)
                                 _uiEffects.trySend(ChatUiSideEffect.HapticThinkingCompleted)
@@ -540,24 +533,25 @@ class ChatViewModel @JvmOverloads constructor(
                         }
 
                         is GeminiStreamEvent.ContentStarted -> {
-                            flushDeltasToUi()
+                            typewriter.markThinkingEnded()
                             withContext(Dispatchers.Main.immediate) {
                                 handleDiscreteEvent(assistantMessageId, event)
                                 _uiEffects.trySend(ChatUiSideEffect.ScrollToBottom)
                             }
                         }
 
+                        is GeminiStreamEvent.ContentDelta -> {
+                            typewriter.enqueueContent(event.text)
+                        }
+
                         is GeminiStreamEvent.Completed -> {
-                            flushDeltasToUi()
+                            typewriter.markStreamEnded()
                             withContext(Dispatchers.Main.immediate) {
                                 handleDiscreteEvent(assistantMessageId, event)
-                                _uiEffects.trySend(ChatUiSideEffect.HapticGenerationFinished)
-                                _uiEffects.trySend(ChatUiSideEffect.ScrollToBottom)
                             }
                         }
 
                         else -> {
-                            flushDeltasToUi()
                             withContext(Dispatchers.Main.immediate) {
                                 handleDiscreteEvent(assistantMessageId, event)
                             }
@@ -566,21 +560,21 @@ class ChatViewModel @JvmOverloads constructor(
                 }
             } catch (_: CancellationException) {
                 withContext(NonCancellable) {
-                    flushDeltasToUi()
+                    typewriter.stopAndFlush()
                     withContext(Dispatchers.Main.immediate) {
                         finalizeAssistantMessage(assistantMessageId, FinishReason.STOP)
                     }
                 }
             } catch (e: GeminiApiException) {
                 withContext(NonCancellable) {
-                    flushDeltasToUi()
+                    typewriter.stopAndFlush()
                     withContext(Dispatchers.Main.immediate) {
                         handleApiError(assistantMessageId, e)
                     }
                 }
             } catch (e: Exception) {
                 withContext(NonCancellable) {
-                    flushDeltasToUi()
+                    typewriter.stopAndFlush()
                     withContext(Dispatchers.Main.immediate) {
                         _uiState.update {
                             it.copy(
@@ -591,59 +585,66 @@ class ChatViewModel @JvmOverloads constructor(
                         finalizeAssistantMessage(assistantMessageId, FinishReason.UNKNOWN)
                     }
                 }
-            } finally {
-                withContext(NonCancellable + Dispatchers.Main.immediate) {
-                    _uiState.update { it.copy(isGenerating = false) }
-                }
             }
         }
     }
 
     fun onCancelGeneration() {
+        activeTypewriter?.stopAndFlush()
+        activeTypewriter = null
         generationJob?.cancel()
         generationJob = null
+        _uiState.update { it.copy(isGenerating = false) }
     }
 
     private fun handleDiscreteEvent(assistantMessageId: String, event: GeminiStreamEvent) {
         _uiState.update { currentState ->
             val messages = currentState.messages
-            val lastIdx = messages.lastIndex
+            val idx = messages.indexOfLast { it.id == assistantMessageId }
+            if (idx == -1) return@update currentState
 
-            fun updateMessage(msg: UiChatMessage): UiChatMessage {
-                return when (event) {
-                    is GeminiStreamEvent.Connecting -> msg.copy(isStreaming = true)
-                    is GeminiStreamEvent.ThinkingStarted -> msg.copy(isThinkingActive = true, isThinkingExpanded = true)
-                    is GeminiStreamEvent.ThinkingCompleted -> msg.copy(
-                        isThinkingActive = false,
-                        isThinkingExpanded = false,
-                        thinkingDurationMs = msg.thinkingDurationMs + event.durationMs
-                    )
-                    is GeminiStreamEvent.ContentStarted -> msg.copy(isThinkingActive = false)
-                    is GeminiStreamEvent.SearchQueriesDiscovered -> msg.copy(searchQueries = (msg.searchQueries + event.queries).distinct())
-                    is GeminiStreamEvent.SourcesDiscovered -> msg.copy(sources = (msg.sources + event.newSources).distinctBy { it.url })
-                    is GeminiStreamEvent.CitationsDiscovered -> msg.copy(citations = (msg.citations + event.citations).distinct())
-                    is GeminiStreamEvent.SearchEntryPointRendered -> msg.copy(searchSuggestionsHtml = event.htmlContent)
-                    is GeminiStreamEvent.UsageReported -> msg.copy(usage = event)
-                    is GeminiStreamEvent.Completed -> msg.copy(
-                        isStreaming = false,
-                        isThinkingActive = false,
-                        finishReason = event.finishReason,
-                        thoughtSignature = event.thoughtSignature ?: msg.thoughtSignature
-                    )
-                    else -> msg
-                }
+            val currentMsg = messages[idx]
+
+            val updatedMessage = when (event) {
+                is GeminiStreamEvent.Connecting -> currentMsg.copy(isStreaming = true)
+                is GeminiStreamEvent.ThinkingStarted -> currentMsg.copy(
+                    isThinkingActive = true,
+                    isThinkingExpanded = true,
+                    hasThoughts = true
+                )
+                is GeminiStreamEvent.ThinkingCompleted -> currentMsg.copy(
+                    isThinkingActive = false,
+                    isThinkingExpanded = false, // Плавно сворачиваем, но не удаляем!
+                    hasThoughts = true,
+                    thinkingDurationMs = currentMsg.thinkingDurationMs + event.durationMs
+                )
+                is GeminiStreamEvent.ContentStarted -> currentMsg.copy(
+                    isThinkingActive = false,
+                    isThinkingExpanded = false
+                )
+                is GeminiStreamEvent.SearchQueriesDiscovered -> currentMsg.copy(
+                    searchQueries = (currentMsg.searchQueries + event.queries).distinct()
+                )
+                is GeminiStreamEvent.SourcesDiscovered -> currentMsg.copy(
+                    sources = (currentMsg.sources + event.newSources).distinctBy { it.url }
+                )
+                is GeminiStreamEvent.CitationsDiscovered -> currentMsg.copy(
+                    citations = (currentMsg.citations + event.citations).distinct()
+                )
+                is GeminiStreamEvent.SearchEntryPointRendered -> currentMsg.copy(
+                    searchSuggestionsHtml = event.htmlContent
+                )
+                is GeminiStreamEvent.UsageReported -> currentMsg.copy(usage = event)
+                is GeminiStreamEvent.Completed -> currentMsg.copy(
+                    finishReason = event.finishReason,
+                    thoughtSignature = event.thoughtSignature ?: currentMsg.thoughtSignature
+                )
+                else -> currentMsg
             }
 
-            if (lastIdx >= 0 && messages[lastIdx].id == assistantMessageId) {
-                val newMessages = ArrayList(messages)
-                newMessages[lastIdx] = updateMessage(messages[lastIdx])
-                currentState.copy(messages = newMessages)
-            } else {
-                val updatedList = messages.map { msg ->
-                    if (msg.id == assistantMessageId) updateMessage(msg) else msg
-                }
-                currentState.copy(messages = updatedList)
-            }
+            val newMessages = ArrayList(messages)
+            newMessages[idx] = updatedMessage
+            currentState.copy(messages = newMessages)
         }
     }
 
@@ -708,6 +709,8 @@ class ChatViewModel @JvmOverloads constructor(
 
     override fun onCleared() {
         super.onCleared()
+        activeTypewriter?.stopAndFlush()
+        activeTypewriter = null
         generationJob?.cancel()
         countdownJob?.cancel()
         if (shouldCloseClientOnExit) {
@@ -718,7 +721,6 @@ class ChatViewModel @JvmOverloads constructor(
     companion object {
         private const val PREF_KEY_API_KEY = "gemini_api_key"
         private const val KEY_INPUT_DRAFT = "key_input_draft_text"
-        private const val UI_BATCH_INTERVAL_MS = 33L
 
         private fun createSafeSharedPreferences(context: Context): SharedPreferences {
             return try {

@@ -147,13 +147,15 @@ class TypewriterEngine(
 
     private fun calculateAdaptiveSpeed(backlog: Int, isFlushing: Boolean): Float {
         if (isFlushing) {
-            return max(3f, backlog / 6f)
+            return max(4f, backlog / 4f)
         }
         return when {
             backlog <= 4 -> 1.2f
             backlog <= 15 -> 2.5f
             backlog <= 60 -> 6.0f
-            else -> backlog / 10f
+            backlog <= 200 -> 14.0f
+            backlog <= 1000 -> 30.0f
+            else -> backlog / 15f
         }
     }
 

@@ -99,7 +99,9 @@ dependencies {
     implementation(libs.androidx.security.crypto)
 }
 
-// Ленивая конфигурация задач AAR без нарушения Gradle Configuration Cache
-tasks.withType<com.android.build.gradle.tasks.CheckAarMetadataTask>().configureEach {
-    enabled = false
+// Ленивое отключение проверки метаданных AAR без обращения к внутренним пакетам AGP
+tasks.configureEach {
+    if (name.contains("AarMetadata")) {
+        enabled = false
+    }
 }

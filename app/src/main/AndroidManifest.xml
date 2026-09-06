@@ -2,15 +2,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- 
-      1. Сетевые привилегии (Кубик 1 - GeminiClient):
+      1. Сетевые привилегии:
       Необходимы для работы неблокирующего сокет-движка Ktor CIO и сетевой телеметрии TrafficStats
     -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!-- 
-      2. Декларация видимости пакетов (Кубик 3 - ChatGptScreen):
-      Гарантирует открытие ссылок веб-источников Google Search Grounding в браузере (Android 11–16)
+      2. Декларация видимости пакетов:
+      Гарантирует открытие внешних ссылок веб-источников Google Search Grounding в браузере
     -->
     <queries>
         <intent>
@@ -32,17 +32,6 @@
         android:allowBackup="false"
         android:appCategory="productivity">
 
-        <!-- 
-          3. Метаданные One UI 8.5 и Samsung DeX (Кубик 4 - MainActivity):
-          Обеспечивают непрерывную работу приложения в десктопном и многооконном режимах
-        -->
-        <meta-data
-            android:name="com.samsung.android.sdk.multiwindow.enable"
-            android:value="true" />
-        <meta-data
-            android:name="com.samsung.android.keepalive.density"
-            android:value="true" />
-
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -51,20 +40,23 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode|density"
             android:resizeableActivity="true">
 
-            <!-- Защита от сжатия компоновки в Split-Screen на экране S23 Ultra -->
+            <!-- 
+              Поддержка разделения экрана (Split-Screen) и Samsung DeX на Galaxy S23 Ultra.
+              Габариты 280x320dp гарантируют свободное деление экрана 50/50 в портретной ориентации.
+            -->
             <layout
-                android:minWidth="320dp"
-                android:minHeight="420dp" />
+                android:minWidth="280dp"
+                android:minHeight="320dp" />
 
-            <!-- Точка входа приложения (Лаунчер) -->
+            <!-- Главная точка входа (Launcher) -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
             <!-- 
-              4. Системный перехват одиночного текста и файлов (Кубик 4 - MainActivity):
-              Обеспечивает появление ClientG в меню «Поделиться» любого приложения
+              Системный перехват одиночного текста и документов:
+              Ограничен строго текстовыми форматами без бинарного application/octet-stream
             -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
@@ -74,13 +66,9 @@
                 <data android:mimeType="application/xml" />
                 <data android:mimeType="application/x-yaml" />
                 <data android:mimeType="application/javascript" />
-                <data android:mimeType="application/octet-stream" />
             </intent-filter>
 
-            <!-- 
-              5. Системный перехват пакета файлов (Кубик 4 - MainActivity):
-              Позволяет отправлять несколько файлов из Samsung My Files одновременно
-            -->
+            <!-- Системный перехват пакета текстовых файлов из проводника -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND_MULTIPLE" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -89,7 +77,6 @@
                 <data android:mimeType="application/xml" />
                 <data android:mimeType="application/x-yaml" />
                 <data android:mimeType="application/javascript" />
-                <data android:mimeType="application/octet-stream" />
             </intent-filter>
 
         </activity>

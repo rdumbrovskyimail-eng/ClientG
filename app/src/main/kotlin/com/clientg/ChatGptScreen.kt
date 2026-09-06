@@ -84,24 +84,20 @@ private val TextPrimary = Color(0xFFF2F2F2)
 private val TextSecondary = Color(0xFF8E8E93)
 private val TextMuted = Color(0xFF555555)
 
-// Неоновые градиенты рассуждения (Thinking Glow)
 private val ThinkingGlowStart = Color(0xFF4C8DFF)
 private val ThinkingGlowEnd = Color(0xFF6C5CE7)
 private val ThinkingCardBg = Color(0xFF0E1218)
 private val ThinkingBorder = Color(0xFF1A2230)
 
-// Палитра веб-поиска Google Grounding
 private val SearchActiveBg = Color(0xFF0F1E2E)
 private val SearchActiveBorder = Color(0xFF183B5E)
 private val SearchActiveText = Color(0xFF8AB4F8)
 
-// Палитра блоков кода в стиле JetBrains Fleet
 private val CodeBlockBg = Color(0xFF080808)
 private val CodeBlockHeaderBg = Color(0xFF121212)
 private val InlineCodeBg = Color(0xFF222222)
 private val InlineCodeText = Color(0xFFFFD54F)
 
-// Легковесные векторные иконки без тяжелых библиотек
 private val ArrowUpwardIcon: ImageVector by lazy {
     ImageVector.Builder("ArrowUp", 24.dp, 24.dp, 24f, 24f).apply {
         path(fill = SolidColor(Color.White)) {
@@ -218,7 +214,6 @@ fun ChatGptScreen(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
-    // Интеллектуальный расчет нахождения внизу списка
     val isAtBottom by remember {
         derivedStateOf {
             val total = listState.layoutInfo.totalItemsCount
@@ -228,12 +223,10 @@ fun ChatGptScreen(
         }
     }
 
-    // Закрытие диалога системным жестом Назад
     BackHandler(enabled = uiState.isApiKeyDialogOpen) {
         viewModel.onCloseApiKeyDialog()
     }
 
-    // Слушатель одноразовых эффектов
     LaunchedEffect(Unit) {
         viewModel.uiEffects.collect { effect ->
             when (effect) {
@@ -273,7 +266,6 @@ fun ChatGptScreen(
             .navigationBarsPadding()
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // 1. Верхняя панель (Top Bar) с выбором уровня Thinking
             ChatTopBar(
                 currentLevel = uiState.thinkingLevel,
                 onClearChat = { viewModel.onClearChat() },
@@ -281,7 +273,6 @@ fun ChatGptScreen(
                 onThinkingLevelSelected = { viewModel.onThinkingLevelChanged(it) }
             )
 
-            // 2. Баннер ошибки и таймера квоты 429
             if (uiState.errorMessage != null) {
                 ErrorBanner(
                     message = uiState.errorMessage ?: "",
@@ -291,7 +282,6 @@ fun ChatGptScreen(
                 )
             }
 
-            // 3. Область сообщений или стартовый Hero экран
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -335,27 +325,30 @@ fun ChatGptScreen(
                         }
                     }
 
-                    // Парящая кнопка умного автоскролла вниз (Smart Scroll FAB)
-                    AnimatedVisibility(
-                        visible = !isAtBottom && uiState.messages.isNotEmpty(),
-                        enter = scaleIn(animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f)) + fadeIn(),
-                        exit = scaleOut() + fadeOut(),
+                    // Обернуто в явный Column для устранения DSL_SCOPE_VIOLATION компилятора K2
+                    Column(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
-                            .padding(bottom = 12.dp)
+                            .padding(bottom = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        FloatingScrollBottomButton(
-                            onClick = {
-                                coroutineScope.launch {
-                                    listState.animateScrollToItem(uiState.messages.size - 1)
+                        AnimatedVisibility(
+                            visible = !isAtBottom && uiState.messages.isNotEmpty(),
+                            enter = scaleIn(animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f)) + fadeIn(),
+                            exit = scaleOut() + fadeOut()
+                        ) {
+                            FloatingScrollBottomButton(
+                                onClick = {
+                                    coroutineScope.launch {
+                                        listState.animateScrollToItem(uiState.messages.size - 1)
+                                    }
                                 }
-                            }
-                        )
+                            )
+                        }
                     }
                 }
             }
 
-            // 4. Панель вложений над полем ввода
             if (uiState.attachedFiles.isNotEmpty()) {
                 AttachmentChipsBar(
                     attachments = uiState.attachedFiles,
@@ -363,7 +356,6 @@ fun ChatGptScreen(
                 )
             }
 
-            // 5. Капсула ввода сообщений в стиле ChatGPT Pro
             ChatGptInputBar(
                 text = uiState.inputText,
                 isGenerating = uiState.isGenerating,
@@ -453,7 +445,7 @@ private fun EmptyStateHero(
             )
 
             Text(
-                text = "Gemini 3.8 Flash • Deep Reasoning • Web Grounded",
+                text = "Gemini 3.8 Flash • Deep Reasoning • Grounding",
                 color = TextSecondary,
                 fontSize = 13.sp,
                 modifier = Modifier.padding(top = 6.dp, bottom = 32.dp)
@@ -488,7 +480,7 @@ private fun EmptyStateHero(
 }
 
 // ====================================================================
-// Верхняя панель (Top Bar) с выбором Thinking Level
+// Верхняя панель (Top Bar)
 // ====================================================================
 
 @Composable
@@ -518,7 +510,6 @@ private fun ChatTopBar(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
 
-                // Кликабельный бейдж с выпадающим меню глубины мышления
                 Box {
                     Surface(
                         shape = RoundedCornerShape(6.dp),
@@ -730,7 +721,6 @@ private fun ChatMessageItem(
             }
         } else {
             Column(modifier = Modifier.fillMaxWidth()) {
-                // 1. Thinking Accordion (с оптимизацией отключения анимации в покое)
                 if (message.thoughtText.isNotEmpty() || message.isThinkingActive) {
                     ThinkingAccordionCard(
                         thoughtText = message.thoughtText,
@@ -742,7 +732,6 @@ private fun ChatMessageItem(
                     Spacer(modifier = Modifier.height(10.dp))
                 }
 
-                // 2. Блоки веб-поиска Google Grounding
                 if (message.searchQueries.isNotEmpty() || message.sources.isNotEmpty()) {
                     SearchGroundingBlock(
                         queries = message.searchQueries,
@@ -752,7 +741,6 @@ private fun ChatMessageItem(
                     Spacer(modifier = Modifier.height(10.dp))
                 }
 
-                // 3. Основной текст с поддержкой заголовков, списков и блоков кода
                 if (message.text.isNotEmpty()) {
                     SelectionContainer {
                         NativeMarkdownContent(text = message.text)
@@ -766,7 +754,6 @@ private fun ChatMessageItem(
                     )
                 }
 
-                // 4. Панель действий ассистента
                 if (!message.isStreaming && message.text.isNotEmpty()) {
                     Row(
                         modifier = Modifier
@@ -833,7 +820,7 @@ private fun ChatMessageItem(
 }
 
 // ====================================================================
-// Thinking Accordion: GPU-ускоренный Ethereal Glow (1Hz в покое)
+// Thinking Accordion
 // ====================================================================
 
 @Composable

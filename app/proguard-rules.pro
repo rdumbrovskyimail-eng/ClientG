@@ -15,16 +15,16 @@
 # --------------------------------------------------------------------
 # 2. Аппаратная оптимизация R8 Full Mode (Snapdragon 8 Gen 2)
 # --------------------------------------------------------------------
-# Разрешаем агрессивное расширение модификаторов доступа для прямого инлайнинга в ядрах ARM Cortex-X3
+# Агрессивное расширение модификаторов доступа для прямого инлайнинга в ядрах ARM Cortex-X3
 -allowaccessmodification
 -repackageclasses ''
 
 # --------------------------------------------------------------------
-# 3. Ktor 3.5.2 Client (Движок CIO, сетевые сокеты и буферы)
+# 3. Ktor 3.x Client (Движок CIO, сетевые сокеты и буферы)
 # --------------------------------------------------------------------
 -dontwarn io.ktor.**
 
-# Защита атомарных апдейтеров (AtomicReferenceFieldUpdater), используемых Ktor CIO
+# Защита атомарных апдейтеров (AtomicReferenceFieldUpdater), используемых сокетным движком Ktor CIO
 -keepclassmembers class io.ktor.utils.io.** {
     volatile <fields>;
 }
@@ -35,12 +35,12 @@
     volatile <fields>;
 }
 
-# Сохранение фабрик и движков Ktor
+# Сохранение фабрик, плагинов и контейнеров движка CIO
 -keep class io.ktor.client.engine.cio.CIOEngineContainer { *; }
 -keep class io.ktor.client.plugins.** { *; }
 
 # --------------------------------------------------------------------
-# 4. Kotlinx Coroutines 1.11.0 (Диспетчеры и фабрики)
+# 4. Kotlinx Coroutines (Диспетчеры, фабрики ServiceLoader)
 # --------------------------------------------------------------------
 -dontwarn kotlinx.coroutines.**
 
@@ -61,7 +61,7 @@
 }
 
 # --------------------------------------------------------------------
-# 5. Kotlinx Serialization 1.12.0-RC & DTO модели Gemini 3.8 Flash
+# 5. Kotlinx Serialization & Wire DTO модели Gemini
 # --------------------------------------------------------------------
 -dontnote kotlinx.serialization.**
 -dontwarn kotlinx.serialization.**
@@ -83,7 +83,8 @@
     public static final *** INSTANCE;
 }
 
-# Прямая защита всех Wire-моделей сетевого пакета com.clientg.network
+# Прямая защита сетевых DTO и их сгенерированных сериализаторов $serializer
+-keep class com.clientg.network.** { *; }
 -keepclassmembers class com.clientg.network.** {
     *** Companion;
     *** $serializer;
@@ -91,7 +92,7 @@
 }
 
 # --------------------------------------------------------------------
-# 6. AndroidX Security Crypto 1.1.0 & Google Tink (Samsung Knox Vault)
+# 6. AndroidX Security Crypto & Google Tink (Samsung Knox Vault)
 # --------------------------------------------------------------------
 -dontwarn androidx.security.crypto.**
 -dontwarn com.google.crypto.tink.**
@@ -106,7 +107,7 @@
 -keepclassmembers class * extends java.security.Provider { *; }
 
 # --------------------------------------------------------------------
-# 7. Jetpack Compose (BOM 2026.08.00 / Material 3 1.5.0-alpha27)
+# 7. Jetpack Compose (Классовые правила стабильности и состояние)
 # --------------------------------------------------------------------
 -dontwarn androidx.compose.**
 
@@ -114,16 +115,16 @@
 -keepclassmembers class * extends androidx.compose.runtime.State { *; }
 -keepclassmembers class * extends androidx.compose.runtime.MutableState { *; }
 
-# Защита стабильности классов Compose
--keepclassmembers class * {
-    @androidx.compose.runtime.Stable <fields>;
-    @androidx.compose.runtime.Immutable <fields>;
-}
+# Корректная защита стабильности классов Compose (таргет CLASS)
+-keep @androidx.compose.runtime.Stable class * { *; }
+-keep @androidx.compose.runtime.Immutable class * { *; }
+-keepclassmembers @androidx.compose.runtime.Stable class * { *; }
+-keepclassmembers @androidx.compose.runtime.Immutable class * { *; }
 
 # --------------------------------------------------------------------
 # 8. Android Architecture Components (ViewModel & Activity)
 # --------------------------------------------------------------------
-# Защита конструктора рефлексии AndroidViewModel(Application) для ChatViewModel
+# Защита конструкторов AndroidViewModel(Application) и ViewModel() для рефлексии фабрик
 -keepclassmembers class * extends androidx.lifecycle.AndroidViewModel {
     public <init>(android.app.Application);
 }
@@ -131,5 +132,5 @@
     public <init>();
 }
 
-# Защита системного предиктивного жеста Назад (Android 16 API 36)
+# Защита системного предиктивного жеста Назад (Android 14–16 API 34–36)
 -keep class * implements android.window.OnBackInvokedCallback { *; }

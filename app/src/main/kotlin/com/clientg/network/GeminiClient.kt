@@ -329,7 +329,7 @@ class GeminiClient(
 ) : Closeable {
 
     companion object {
-        private const val BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+        private const val BASE_URL = "https://aiplatform.googleapis.com/v1/publishers/google/models"
         private const val DEFAULT_MODEL_NAME = "gemini-3.8-flash"
         private const val ANDROID_NET_TAG = 0x0000FA01
 
@@ -475,7 +475,7 @@ class GeminiClient(
 
         emit(GeminiStreamEvent.Connecting)
         val startTime = SystemClock.elapsedRealtime()
-        val endpointUrl = "$BASE_URL/$modelName:streamGenerateContent?alt=sse"
+        val endpointUrl = "$BASE_URL/$modelName:streamGenerateContent?key=$apiKey&alt=sse"
 
         // 1. Формирование валидной истории диалога (исключаем пустые ходы модели без текста)
         val rawTurns = ArrayList<ContentDto>(history.size + 1)

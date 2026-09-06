@@ -217,6 +217,7 @@ internal data class SafetyRatingDto(
 internal data class CandidateDto(
     val content: ContentResponseDto? = null,
     val finishReason: String? = null,
+    @SerialName("finish_reason") val finishReasonSnake: String? = null,
     val groundingMetadata: GroundingMetadataDto? = null
 )
 
@@ -451,8 +452,8 @@ class GeminiClient(
         prompt: String,
         history: List<ChatMessage> = emptyList(),
         attachments: List<TextAttachment> = emptyList(),
-        thinkingLevel: ThinkingLevel = ThinkingLevel.HIGH,
-        enableSearch: Boolean = true,
+        thinkingLevel: ThinkingLevel = ThinkingLevel.MEDIUM,
+        enableSearch: Boolean = false,
         modelName: String = DEFAULT_MODEL_NAME,
         systemInstruction: String = IMMUTABLE_SYSTEM_INSTRUCTION
     ): Flow<GeminiStreamEvent> = flow {
@@ -593,7 +594,10 @@ class GeminiClient(
                     val rawFallback = errorBody.take(300).trim()
                     val message = when (httpResponse.status) {
                         HttpStatusCode.TooManyRequests -> {
-                            if (retrySeconds != null) {
+                            val googleMsg = parsedError?.message ?: ""
+                            if (googleMsg.contains("search", ignoreCase = true) || googleMsg.contains("grounding", ignoreCase = true)) {
+                                "Превышена квота поиска Google Search. Отключите поиск (кнопка 🌐) или привяжите биллинг."
+                            } else if (retrySeconds != null) {
                                 "Превышен лимит запросов к Gemini API. Повторите через $retrySeconds сек."
                             } else {
                                 "Превышен лимит запросов (429 Quota Exceeded). Подождите несколько секунд."
@@ -663,10 +667,12 @@ class GeminiClient(
 
                     val candidate = chunk.candidates?.firstOrNull()
 
-                    candidate?.finishReason?.let { reason ->
+                    // Поддержка finishReason в обоих стилях (camelCase и snake_case)
+                    val rawFinishReason = candidate?.finishReason ?: candidate?.finishReasonSnake
+                    if (!rawFinishReason.isNullOrBlank()) {
                         hasReceivedTerminalFinishReason = true
                         isStreamGracefullyClosed = true
-                        finalFinishReason = when (reason) {
+                        finalFinishReason = when (rawFinishReason.uppercase(Locale.US)) {
                             "STOP" -> FinishReason.STOP
                             "MAX_TOKENS" -> FinishReason.MAX_TOKENS
                             "SAFETY" -> FinishReason.SAFETY
@@ -678,8 +684,7 @@ class GeminiClient(
                         }
                     }
 
-                    // НЮАНС 1: Парсинг текстовых фрагментов выполняется ДО groundingMetadata,
-                    // чтобы accumulatedContentText содержал текст текущего чанка при расчете смещений
+                    // 1) Сначала обрабатываем части контента
                     candidate?.content?.parts?.forEach { part ->
                         part.thoughtSignature?.let { signature ->
                             if (signature.isNotBlank()) {
@@ -713,6 +718,7 @@ class GeminiClient(
                         }
                     }
 
+                    // 2) Затем обрабатываем метаданные заземления
                     candidate?.groundingMetadata?.let { meta ->
                         meta.webSearchQueries?.let { queries ->
                             val newQueries = queries.filter { discoveredQueries.add(it) }
@@ -841,11 +847,14 @@ class GeminiClient(
                     processCompleteSsePayload(remainingPayload)
                 }
 
-                if (!isStreamGracefullyClosed && !hasReceivedTerminalFinishReason) {
+                // КЛЮЧЕВОЙ ФИКС: В Gemini API окончание потока по Natural EOF является штатным.
+                // Ошибкой является ТОЛЬКО ситуация, когда сервер закрыл сокет с нулевым результатом (0 мыслей и 0 текста).
+                val hasReceivedAnyContent = totalThoughtChars > 0 || accumulatedContentText.isNotEmpty()
+                if (!isStreamGracefullyClosed && !hasReceivedTerminalFinishReason && !hasReceivedAnyContent) {
                     throw GeminiApiException(
                         httpStatusCode = HttpStatusCode.GatewayTimeout,
                         googleErrorCode = "PREMATURE_STREAM_DISCONNECT",
-                        userFriendlyMessage = "Сетевое соединение прервалось до завершения ответа. Повторите запрос."
+                        userFriendlyMessage = "Сетевое соединение прервалось до получения ответа. Повторите запрос."
                     )
                 }
 

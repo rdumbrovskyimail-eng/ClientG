@@ -79,13 +79,13 @@ class ChatViewModel @JvmOverloads constructor(
     private val externalClient: GeminiClient? = null
 ) : AndroidViewModel(application) {
 
-    // Дефект №10: Восстановление черновика ввода после Process Death
+    // Восстановление черновика ввода после Process Death
     private val initialInputText: String = savedStateHandle?.get<String>(KEY_INPUT_DRAFT) ?: ""
 
     private val _uiState = MutableStateFlow(ChatUiState(inputText = initialInputText))
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
 
-    // Дефект №2: Буферизованный канал с DROP_OLDEST исключает дедлок фоновой генерации при свернутом UI
+    // Буферизованный канал с DROP_OLDEST исключает дедлок фоновой генерации при свернутом UI
     private val _uiEffects = Channel<ChatUiSideEffect>(
         capacity = Channel.BUFFERED,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
@@ -98,12 +98,12 @@ class ChatViewModel @JvmOverloads constructor(
     private var generationJob: Job? = null
     private var countdownJob: Job? = null
 
-    // Дефект №3: Потокобезопасная инициализация SharedPreferences с защитой от гонок памяти в JMM
+    // Потокобезопасная инициализация SharedPreferences с защитой от гонок памяти в JMM
     @Volatile
     private var securePrefs: SharedPreferences? = null
     private val prefsMutex = Mutex()
 
-    // Дефект №11: Изолированный кэш API-ключа вне частых снимков StateFlow
+    // Изолированный кэш API-ключа вне частых снимков StateFlow
     @Volatile
     private var cachedApiKey: String = ""
 
@@ -140,7 +140,6 @@ class ChatViewModel @JvmOverloads constructor(
     // ================================================================
 
     fun onInputTextChanged(newText: String) {
-        // Дефект №10: Сохранение черновика в SavedStateHandle
         savedStateHandle?.set(KEY_INPUT_DRAFT, newText)
         _uiState.update { it.copy(inputText = newText) }
     }
@@ -225,8 +224,8 @@ class ChatViewModel @JvmOverloads constructor(
                 var fileName = "attachment.txt"
                 var fileSize = 0L
 
-                // Дефект №9: Передача CancellationSignal для безопасного прерывания IPC-запроса в SAF
-                resolver.query(uri, null, null, null, signal)?.use { cursor ->
+                // ИСПРАВЛЕНИЕ ОШИБКИ КОМПИЛЯЦИИ: ровно 6 аргументов для вызова query с CancellationSignal
+                resolver.query(uri, null, null, null, null, signal)?.use { cursor ->
                     val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                     val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
                     if (cursor.moveToFirst()) {
@@ -246,7 +245,6 @@ class ChatViewModel @JvmOverloads constructor(
                     throw IllegalArgumentException("Файл '$fileName' ($sizeMb МБ) превышает допустимый лимит ($limitMb МБ).")
                 }
 
-                // Дефект №13: Срез маркера BOM и защита от повреждения кодировки
                 val content = resolver.openInputStream(uri)?.use { stream ->
                     readStreamSafely(stream, TextAttachment.MAX_ATTACHMENT_CHARS)
                 } ?: throw IllegalArgumentException("Не удалось открыть поток чтения файла.")
@@ -255,7 +253,6 @@ class ChatViewModel @JvmOverloads constructor(
 
                 withContext(Dispatchers.Main) {
                     _uiState.update { current ->
-                        // Дефект №12: Умная дедупликация файлов с разрешением коллизий одинаковых имен
                         val uniqueAttachment = makeUniqueAttachment(current.attachedFiles, newAttachment)
                         if (uniqueAttachment != null) {
                             current.copy(attachedFiles = current.attachedFiles + uniqueAttachment)
@@ -280,10 +277,9 @@ class ChatViewModel @JvmOverloads constructor(
         _uiState.update { it.copy(attachedFiles = it.attachedFiles - attachment) }
     }
 
-    // Дефект №12: Функция разрешения конфликтов имен одинаковых файлов
     private fun makeUniqueAttachment(existing: List<TextAttachment>, attachment: TextAttachment): TextAttachment? {
         if (existing.any { it.fileName == attachment.fileName && it.content == attachment.content }) {
-            return null // Полный дубликат содержимого
+            return null
         }
         if (existing.none { it.fileName == attachment.fileName }) {
             return attachment
@@ -300,7 +296,6 @@ class ChatViewModel @JvmOverloads constructor(
         return TextAttachment(fileName = candidateName, content = attachment.content)
     }
 
-    // Дефект №13: Безопасное чтение потока со срезом маркера BOM UTF-8 (\uFEFF)
     private fun readStreamSafely(stream: InputStream, maxChars: Int): String {
         val reader = stream.bufferedReader(Charsets.UTF_8)
         val buffer = CharArray(8192)
@@ -398,12 +393,10 @@ class ChatViewModel @JvmOverloads constructor(
         )
     }
 
-    // Дефект №5: Обратная совместимость с вызовом повтора последнего сообщения
     fun onRetryLastMessage() {
         onRetryMessage(targetMessageId = null)
     }
 
-    // Дефект №5: Адресный повтор сообщений с откатом истории до выбранного раунда диалога
     fun onRetryMessage(targetMessageId: String? = null) {
         val state = _uiState.value
         if (state.isGenerating) return
@@ -473,7 +466,6 @@ class ChatViewModel @JvmOverloads constructor(
         _uiEffects.trySend(ChatUiSideEffect.ScrollToBottom)
         _uiEffects.trySend(ChatUiSideEffect.HapticLightTick)
 
-        // Дефект №7: Сбор и буферизация на фоновом диспатчере для исключения Thread Hopping на 120 Гц
         generationJob = viewModelScope.launch(Dispatchers.Default) {
             val thoughtBuffer = StringBuilder()
             val contentBuffer = StringBuilder()
@@ -616,7 +608,6 @@ class ChatViewModel @JvmOverloads constructor(
         generationJob = null
     }
 
-    // Дефект №8: Оптимизация $O(1)$ для обновления последнего сообщения в handleDiscreteEvent
     private fun handleDiscreteEvent(assistantMessageId: String, event: GeminiStreamEvent) {
         _uiState.update { currentState ->
             val messages = currentState.messages
@@ -660,7 +651,6 @@ class ChatViewModel @JvmOverloads constructor(
         }
     }
 
-    // Дефект №6: Чистое удаление сообщения-призрака, если пользователь отменил генерацию до первого токена
     private fun finalizeAssistantMessage(assistantMessageId: String, reason: FinishReason) {
         _uiState.update { state ->
             val filteredMessages = state.messages.filterNot { msg ->
@@ -679,7 +669,6 @@ class ChatViewModel @JvmOverloads constructor(
         }
     }
 
-    // Дефект №1: Сброс флагов генерации и размышлений при ошибке API для частичных сообщений
     private fun handleApiError(assistantMessageId: String, error: GeminiApiException) {
         _uiState.update { state ->
             val filteredMessages = state.messages.filterNot { msg ->
@@ -733,10 +722,8 @@ class ChatViewModel @JvmOverloads constructor(
     companion object {
         private const val PREF_KEY_API_KEY = "gemini_api_key"
         private const val KEY_INPUT_DRAFT = "key_input_draft_text"
-        // Синхронизация с VSYNC 120 Гц (~33.3 мс, 30 обновлений UI/сек для плавности LTPO без троттлинга)
         private const val UI_BATCH_INTERVAL_MS = 33L
 
-        // Дефект №4: Создание безопасного защищенного хранилища без открытых утечек
         private fun createSafeSharedPreferences(context: Context): SharedPreferences {
             return try {
                 val masterKey = MasterKey.Builder(context)

@@ -39,7 +39,7 @@ if not exist "%WRAPPER_JAR%" (
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
         "$jar = '%WRAPPER_JAR%';" ^
         "$url = 'https://raw.githubusercontent.com/gradle/gradle/v8.13.0/gradle/wrapper/gradle-wrapper.jar';" ^
-        "$expectedHash = '4ba9b0b467b7fec965b6a71e8da6eb85cf6bd9868eec2496a7576f3f0cfc24d6';" ^
+        "$expectedHash = '81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f';" ^
         "$tls = [Net.SecurityProtocolType]::Tls12; " ^
         "try { $tls = $tls -bor [Net.SecurityProtocolType]::Tls13 } catch {}; " ^
         "[Net.ServicePointManager]::SecurityProtocol = $tls; " ^
@@ -85,7 +85,7 @@ set JAVA_EXE=%JAVA_HOME%/bin/java.exe
 if exist "%JAVA_EXE%" goto execute
 
 echo.
-echo ERROR: JAVA_HOME is set to an invalid directory: %JAVA_HOME%
+echo ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH.
 echo Please set the JAVA_HOME variable in your environment to match the
 echo location of your Java installation.
 goto fail

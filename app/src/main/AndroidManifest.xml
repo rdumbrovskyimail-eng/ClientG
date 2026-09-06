@@ -1,28 +1,97 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- 
+      1. Сетевые привилегии (Кубик 1 - GeminiClient):
+      Необходимы для работы неблокирующего сокет-движка Ktor CIO и сетевой телеметрии TrafficStats
+    -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- 
+      2. Декларация видимости пакетов (Кубик 3 - ChatGptScreen):
+      Гарантирует открытие ссылок веб-источников Google Search Grounding в браузере (Android 11–16)
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
 
     <application
-        android:allowBackup="true"
         android:label="ClientG"
         android:icon="@android:drawable/sym_def_app_icon"
         android:roundIcon="@android:drawable/sym_def_app_icon"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.NoActionBar"
         android:hardwareAccelerated="true"
-        android:enableOnBackInvokedCallback="true">
+        android:enableOnBackInvokedCallback="true"
+        android:usesCleartextTraffic="false"
+        android:allowBackup="false"
+        android:appCategory="productivity">
+
+        <!-- 
+          3. Метаданные One UI 8.5 и Samsung DeX (Кубик 4 - MainActivity):
+          Обеспечивают непрерывную работу приложения в десктопном и многооконном режимах
+        -->
+        <meta-data
+            android:name="com.samsung.android.sdk.multiwindow.enable"
+            android:value="true" />
+        <meta-data
+            android:name="com.samsung.android.keepalive.density"
+            android:value="true" />
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode|density"
             android:resizeableActivity="true">
+
+            <!-- Защита от сжатия компоновки в Split-Screen на экране S23 Ultra -->
+            <layout
+                android:minWidth="320dp"
+                android:minHeight="420dp" />
+
+            <!-- Точка входа приложения (Лаунчер) -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- 
+              4. Системный перехват одиночного текста и файлов (Кубик 4 - MainActivity):
+              Обеспечивает появление ClientG в меню «Поделиться» любого приложения
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="application/xml" />
+                <data android:mimeType="application/x-yaml" />
+                <data android:mimeType="application/javascript" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+
+            <!-- 
+              5. Системный перехват пакета файлов (Кубик 4 - MainActivity):
+              Позволяет отправлять несколько файлов из Samsung My Files одновременно
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="application/xml" />
+                <data android:mimeType="application/x-yaml" />
+                <data android:mimeType="application/javascript" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+
         </activity>
 
     </application>

@@ -15,20 +15,15 @@ import androidx.core.view.WindowCompat
 import com.clientg.presentation.ChatViewModel
 import android.graphics.Color as AndroidColor
 
-/**
- * Главная точка входа приложения ClientG на платформе Android 16 (API 36).
- * Оптимизирована под процессор Snapdragon 8 Gen 2 for Galaxy и дисплей Dynamic AMOLED 2X.
- */
 class MainActivity : ComponentActivity() {
 
-    // Инициализация ViewModel через AndroidViewModelFactory
     private val chatViewModel: ChatViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // 1. Устранение Overdraw: аппаратная заливка окна черным цветом (#000000)
+        // Устранение Overdraw: аппаратная заливка окна черным цветом (#000000)
         window.setBackgroundDrawable(ColorDrawable(AndroidColor.BLACK))
 
-        // 2. Сквозной режим Edge-to-Edge без системных полос (scrims)
+        // Сквозной режим Edge-to-Edge без затемнений
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT)
@@ -36,15 +31,12 @@ class MainActivity : ComponentActivity() {
 
         super.onCreate(savedInstanceState)
 
-        // 3. Аппаратная конфигурация окна под дисплей Samsung Galaxy S23 Ultra
         configureDisplayWindow()
 
-        // 4. Обработка входящих данных только при первичном запуске
         if (savedInstanceState == null) {
             handleIncomingIntent(intent)
         }
 
-        // 5. Запуск UI-слоя Jetpack Compose
         setContent {
             ChatGptScreen(viewModel = chatViewModel)
         }
@@ -56,15 +48,11 @@ class MainActivity : ComponentActivity() {
         handleIncomingIntent(intent)
     }
 
-    /**
-     * Дефект №10: Извлечение данных из Intent с обязательной поддержкой Android 13–16 ClipData
-     */
     private fun handleIncomingIntent(intent: Intent?) {
         if (intent == null) return
 
         when (intent.action) {
             Intent.ACTION_SEND -> {
-                // Извлечение URI из EXTRA_STREAM либо резервное извлечение из clipData
                 val fileUri: Uri? = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
                     ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
 
@@ -104,12 +92,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Конфигурация параметров дисплея под Samsung S23 Ultra:
-     * - Сквозное заполнение зоны вокруг фронтальной камеры (Cutout Short Edges);
-     * - Отключение системных разделителей навигации;
-     * - Принудительно белые иконки статусной строки на черном фоне.
-     */
     private fun configureDisplayWindow() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
@@ -117,6 +99,7 @@ class MainActivity : ComponentActivity() {
         window.isStatusBarContrastEnforced = false
 
         val params = window.attributes
+        // Без принудительного форсирования 120 Гц: контроллер экрана сам работает на своей физической частоте
         params.layoutInDisplayCutoutMode =
             WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         window.attributes = params

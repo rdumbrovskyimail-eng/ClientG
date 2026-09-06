@@ -62,7 +62,7 @@ data class TextAttachment(
     }
 
     companion object {
-        const val MAX_ATTACHMENT_CHARS = 1_500_000 // Безопасный объем для контекстного окна 1M токенов
+        const val MAX_ATTACHMENT_CHARS = 1_500_000 // Безопасный лимит под 1M окно токенов
     }
 }
 
@@ -332,7 +332,7 @@ class GeminiClient(
         ignoreUnknownKeys = true
         isLenient = true
         encodeDefaults = true
-        explicitNulls = false // Исключает отправку null-полей (защита от 400 Bad Request)
+        explicitNulls = false // Защита от отправки пустых полей в protobuf Google API
     }
 
     fun streamContent(
@@ -360,7 +360,7 @@ class GeminiClient(
             val startTime = System.currentTimeMillis()
             val endpointUrl = "$BASE_URL/$modelName:streamGenerateContent?alt=sse"
 
-            // 1. Формирование истории: экранирование вложений через XML-контейнеры Google DeepMind
+            // 1. Формирование истории диалога: XML-контейнеры для защиты от конфликта тройных грависов
             val rawTurns = ArrayList<ContentDto>(history.size + 1)
             for (msg in history) {
                 val historyParts = buildList {
@@ -376,7 +376,7 @@ class GeminiClient(
                 }
             }
 
-            // 2. Формирование текущего хода пользователя
+            // 2. Формирование текущего пользовательского хода
             val currentParts = buildList {
                 attachments.forEach { att ->
                     add(PartDto("<attachment name=\"${att.fileName}\">\n${att.content}\n</attachment>"))
@@ -395,12 +395,12 @@ class GeminiClient(
             }
             rawTurns.add(ContentDto(role = ChatRole.USER.apiValue, parts = currentParts))
 
-            // 3. Отсечение сообщений model в начале диалога (требование Google API)
+            // 3. Отсечение ведущих сообщений ассистента в начале диалога (требование Google REST)
             while (rawTurns.isNotEmpty() && rawTurns.first().role != ChatRole.USER.apiValue) {
                 rawTurns.removeAt(0)
             }
 
-            // 4. Склеивание подряд идущих ходов одной роли
+            // 4. Склеивание подряд идущих сообщений с одинаковой ролью
             val sanitizedContents = ArrayList<ContentDto>(rawTurns.size)
             for (turn in rawTurns) {
                 val last = sanitizedContents.lastOrNull()
@@ -414,7 +414,7 @@ class GeminiClient(
                 }
             }
 
-            // 5. Безопасная сборка системной инструкции (null если пустая)
+            // 5. Системная инструкция (null, если пустая, для сохранения кэша)
             val systemDto = if (systemInstruction.isNotBlank()) {
                 SystemInstructionDto(listOf(PartDto(systemInstruction)))
             } else {
@@ -451,7 +451,7 @@ class GeminiClient(
             var emittedSearchEntryPoint = false
             var finalFinishReason = FinishReason.UNKNOWN
 
-            // 6. Сетевой вызов с защитой от буферизации прокси (Accept: text/event-stream)
+            // 6. Сетевой вызов с защитой от прокси-буферизации через Accept: text/event-stream
             try {
                 httpClient.preparePost(endpointUrl) {
                     header("x-goog-api-key", apiKey)
@@ -652,7 +652,7 @@ class GeminiClient(
                                 }
                             }
 
-                            // Учет токенизации и эффективности кэша
+                            // Учет токенов и эффективности кэша
                             chunk.usageMetadata?.let { usage ->
                                 val cached = usage.cachedContentTokenCount
                                 val promptTotal = usage.promptTokenCount
@@ -675,11 +675,11 @@ class GeminiClient(
                         } catch (e: GeminiApiException) {
                             throw e
                         } catch (_: Exception) {
-                            // Игнорируем транспортные шумы
+                            // Игнорируем промежуточный шум
                         }
                     }
 
-                    // 7. Полноценный W3C EventBuffer парсинг
+                    // 7. Полноценный W3C EventBuffer разбор потока
                     while (!channel.isClosedForRead) {
                         currentCoroutineContext().ensureActive()
 
@@ -705,7 +705,7 @@ class GeminiClient(
                         }
                     }
 
-                    // Обработка финального остатка буфера
+                    // Финализация остатка буфера
                     if (sseEventDataBuffer.isNotEmpty()) {
                         val remainingPayload = sseEventDataBuffer.toString()
                         sseEventDataBuffer.setLength(0)

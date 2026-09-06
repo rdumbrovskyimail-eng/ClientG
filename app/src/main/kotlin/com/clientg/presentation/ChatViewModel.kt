@@ -25,6 +25,7 @@ data class UiChatMessage(
     val role: ChatRole,
     val text: String = "",
     val attachments: List<TextAttachment> = emptyList(),
+    val thoughtSignature: String? = null,
     // Блок рассуждений (Thinking Engine)
     val thoughtText: String = "",
     val thinkingDurationMs: Long = 0L,
@@ -46,8 +47,8 @@ data class ChatUiState(
     val inputText: String = "",
     val attachedFiles: List<TextAttachment> = emptyList(),
     val isGenerating: Boolean = false,
-    val enableSearch: Boolean = true, // По умолчанию веб-поиск ВКЛЮЧЕН
-    val thinkingLevel: ThinkingLevel = ThinkingLevel.HIGH, // По умолчанию HIGH THINK
+    val enableSearch: Boolean = true,
+    val thinkingLevel: ThinkingLevel = ThinkingLevel.HIGH,
     val apiKey: String = "",
     val isApiKeyDialogOpen: Boolean = false,
     val errorMessage: String? = null,
@@ -66,7 +67,7 @@ sealed interface ChatUiSideEffect {
 // 2. ViewModel: ChatViewModel
 // ====================================================================
 
-class ChatViewModel(
+class ChatViewModel @JvmOverloads constructor(
     application: Application,
     private val externalClient: GeminiClient? = null
 ) : AndroidViewModel(application) {
@@ -83,11 +84,22 @@ class ChatViewModel(
     private var generationJob: Job? = null
     private var countdownJob: Job? = null
 
-    private val securePrefs: SharedPreferences = createSafeSharedPreferences(application)
+    // Потокобезопасная ленивая инициализация хранилища без блокировки UI-потока
+    private var securePrefs: SharedPreferences? = null
+
+    private suspend fun getSecurePrefs(): SharedPreferences = withContext(Dispatchers.IO) {
+        securePrefs ?: createSafeSharedPreferences(getApplication<Application>()).also {
+            securePrefs = it
+        }
+    }
 
     init {
-        val savedKey = securePrefs.getString(PREF_KEY_API_KEY, "") ?: ""
-        _uiState.update { it.copy(apiKey = savedKey) }
+        // Асинхронная загрузка ключа из Keystore (защита от DiskReadViolation на холодном старте)
+        viewModelScope.launch(Dispatchers.IO) {
+            val prefs = getSecurePrefs()
+            val savedKey = prefs.getString(PREF_KEY_API_KEY, "") ?: ""
+            _uiState.update { it.copy(apiKey = savedKey) }
+        }
 
         if (externalClient != null) {
             activeClient = externalClient
@@ -126,15 +138,15 @@ class ChatViewModel(
 
     fun onSaveApiKey(newKey: String) {
         val trimmed = newKey.trim()
-        securePrefs.edit().putString(PREF_KEY_API_KEY, trimmed).apply()
-        _uiState.update {
-            it.copy(
-                apiKey = trimmed,
-                isApiKeyDialogOpen = false,
-                errorMessage = null
-            )
-        }
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
+            getSecurePrefs().edit().putString(PREF_KEY_API_KEY, trimmed).apply()
+            _uiState.update {
+                it.copy(
+                    apiKey = trimmed,
+                    isApiKeyDialogOpen = false,
+                    errorMessage = null
+                )
+            }
             _uiEffects.send(ChatUiSideEffect.ShowToast("API-ключ сохранен в защищенном хранилище"))
         }
     }
@@ -195,11 +207,12 @@ class ChatViewModel(
                     }
                 }
 
-                val maxBytes = TextAttachment.MAX_ATTACHMENT_CHARS.toLong() * 2L
-                if (fileSize > maxBytes) {
-                    val sizeKb = fileSize / 1024
-                    val limitKb = TextAttachment.MAX_ATTACHMENT_CHARS / 1024
-                    throw IllegalArgumentException("Файл '$fileName' ($sizeKb КБ) превышает лимит ($limitKb КБ).")
+                // Лимит в байтах с учетом UTF-8 мультибайтовых символов (до 4 байт на char)
+                val maxBytes = TextAttachment.MAX_ATTACHMENT_CHARS.toLong() * 4L
+                if (fileSize > 0L && fileSize > maxBytes) {
+                    val sizeMb = fileSize / (1024 * 1024)
+                    val limitMb = maxBytes / (1024 * 1024)
+                    throw IllegalArgumentException("Файл '$fileName' ($sizeMb МБ) превышает допустимый лимит ($limitMb МБ).")
                 }
 
                 val content = resolver.openInputStream(uri)?.use { stream ->
@@ -241,7 +254,7 @@ class ChatViewModel(
             if (read == -1) break
             totalCharsRead += read
             if (totalCharsRead > maxChars) {
-                throw IllegalArgumentException("Текстовый файл превышает допустимый лимит (${maxChars / 1024} КБ).")
+                throw IllegalArgumentException("Текстовый файл превышает допустимый лимит ($maxChars символов).")
             }
             builder.append(buffer, 0, read)
         }
@@ -294,7 +307,8 @@ class ChatViewModel(
                 ChatMessage(
                     role = msg.role,
                     text = msg.text,
-                    attachments = msg.attachments
+                    attachments = msg.attachments,
+                    thoughtSignature = msg.thoughtSignature
                 )
             }
         }
@@ -343,7 +357,8 @@ class ChatViewModel(
                 ChatMessage(
                     role = msg.role,
                     text = msg.text,
-                    attachments = msg.attachments
+                    attachments = msg.attachments,
+                    thoughtSignature = msg.thoughtSignature
                 )
             }
         }
@@ -385,6 +400,7 @@ class ChatViewModel(
             val contentBuffer = StringBuilder()
             var lastUiFlushTime = 0L
 
+            // Оптимизированный сброс буфера без GC-трешинга (O(1) замена последнего элемента)
             suspend fun flushDeltasToUi() {
                 if (thoughtBuffer.isEmpty() && contentBuffer.isEmpty()) return
 
@@ -395,17 +411,30 @@ class ChatViewModel(
                 lastUiFlushTime = System.currentTimeMillis()
 
                 _uiState.update { currentState ->
-                    val updatedList = currentState.messages.map { msg ->
-                        if (msg.id == assistantMessageId) {
-                            msg.copy(
-                                thoughtText = if (thoughtDelta.isNotEmpty()) msg.thoughtText + thoughtDelta else msg.thoughtText,
-                                text = if (contentDelta.isNotEmpty()) msg.text + contentDelta else msg.text
-                            )
-                        } else {
-                            msg
+                    val messages = currentState.messages
+                    val lastIdx = messages.lastIndex
+                    if (lastIdx >= 0 && messages[lastIdx].id == assistantMessageId) {
+                        val currentTarget = messages[lastIdx]
+                        val updatedTarget = currentTarget.copy(
+                            thoughtText = if (thoughtDelta.isNotEmpty()) currentTarget.thoughtText + thoughtDelta else currentTarget.thoughtText,
+                            text = if (contentDelta.isNotEmpty()) currentTarget.text + contentDelta else currentTarget.text
+                        )
+                        val newMessages = ArrayList(messages)
+                        newMessages[lastIdx] = updatedTarget
+                        currentState.copy(messages = newMessages)
+                    } else {
+                        val updatedList = messages.map { msg ->
+                            if (msg.id == assistantMessageId) {
+                                msg.copy(
+                                    thoughtText = if (thoughtDelta.isNotEmpty()) msg.thoughtText + thoughtDelta else msg.thoughtText,
+                                    text = if (contentDelta.isNotEmpty()) msg.text + contentDelta else msg.text
+                                )
+                            } else {
+                                msg
+                            }
                         }
+                        currentState.copy(messages = updatedList)
                     }
-                    currentState.copy(messages = updatedList)
                 }
             }
 
@@ -491,7 +520,6 @@ class ChatViewModel(
     fun onCancelGeneration() {
         generationJob?.cancel()
         generationJob = null
-        _uiState.update { it.copy(isGenerating = false) }
     }
 
     private fun handleDiscreteEvent(assistantMessageId: String, event: GeminiStreamEvent) {
@@ -509,7 +537,6 @@ class ChatViewModel(
                     }
 
                     is GeminiStreamEvent.ThinkingCompleted -> {
-                        // Суммируем длительность, если модель размышляла в несколько фаз
                         msg.copy(
                             isThinkingActive = false,
                             isThinkingExpanded = false,
@@ -545,7 +572,8 @@ class ChatViewModel(
                         msg.copy(
                             isStreaming = false,
                             isThinkingActive = false,
-                            finishReason = event.finishReason
+                            finishReason = event.finishReason,
+                            thoughtSignature = event.thoughtSignature ?: msg.thoughtSignature
                         )
                     }
 
@@ -577,7 +605,6 @@ class ChatViewModel(
                 isGenerating = false,
                 errorMessage = error.userFriendlyMessage,
                 retryCountdownSeconds = error.retryAfterSeconds,
-                // Удаляем пустой плейсхолдер сообщения, если генерация упала до первого токена
                 messages = state.messages.filterNot { msg ->
                     msg.id == assistantMessageId && msg.text.isEmpty() && msg.thoughtText.isEmpty()
                 }
@@ -612,7 +639,7 @@ class ChatViewModel(
 
     companion object {
         private const val PREF_KEY_API_KEY = "gemini_api_key"
-        private const val UI_BATCH_INTERVAL_MS = 25L // 40 FPS порог для плавной работы на 120 Гц
+        private const val UI_BATCH_INTERVAL_MS = 25L
 
         private fun createSafeSharedPreferences(context: Context): SharedPreferences {
             return try {
@@ -632,4 +659,3 @@ class ChatViewModel(
         }
     }
 }
-

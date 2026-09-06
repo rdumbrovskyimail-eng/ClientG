@@ -352,8 +352,11 @@ class ChatViewModel @JvmOverloads constructor(
             hasThoughts = true
         )
 
+        // Исключаем пустые ответы ассистента без текста, чтобы не спровоцировать 400 Bad Request
         val sanitizedHistory = state.messages.mapNotNull { msg ->
-            if (msg.text.isBlank() && msg.attachments.isEmpty() && msg.thoughtSignature == null) {
+            if (msg.role == ChatRole.MODEL && msg.text.isBlank()) {
+                null
+            } else if (msg.text.isBlank() && msg.attachments.isEmpty()) {
                 null
             } else {
                 ChatMessage(
@@ -421,7 +424,9 @@ class ChatViewModel @JvmOverloads constructor(
         )
 
         val sanitizedHistory = messagesHistory.mapNotNull { msg ->
-            if (msg.text.isBlank() && msg.attachments.isEmpty() && msg.thoughtSignature == null) {
+            if (msg.role == ChatRole.MODEL && msg.text.isBlank()) {
+                null
+            } else if (msg.text.isBlank() && msg.attachments.isEmpty()) {
                 null
             } else {
                 ChatMessage(
@@ -519,7 +524,6 @@ class ChatViewModel @JvmOverloads constructor(
                 ).collect { event ->
                     when (event) {
                         is GeminiStreamEvent.ThinkingStarted -> {
-                            AppLogger.d(AppLogger.TAG_VM, "Поток: событие ThinkingStarted")
                             withContext(Dispatchers.Main.immediate) {
                                 handleDiscreteEvent(assistantMessageId, event)
                             }
@@ -530,7 +534,6 @@ class ChatViewModel @JvmOverloads constructor(
                         }
 
                         is GeminiStreamEvent.ThinkingCompleted -> {
-                            AppLogger.d(AppLogger.TAG_VM, "Поток: событие ThinkingCompleted (${event.durationMs}мс)")
                             typewriter.markThinkingEnded()
                             withContext(Dispatchers.Main.immediate) {
                                 handleDiscreteEvent(assistantMessageId, event)
@@ -539,7 +542,6 @@ class ChatViewModel @JvmOverloads constructor(
                         }
 
                         is GeminiStreamEvent.ContentStarted -> {
-                            AppLogger.d(AppLogger.TAG_VM, "Поток: событие ContentStarted")
                             typewriter.markThinkingEnded()
                             withContext(Dispatchers.Main.immediate) {
                                 handleDiscreteEvent(assistantMessageId, event)
@@ -552,7 +554,6 @@ class ChatViewModel @JvmOverloads constructor(
                         }
 
                         is GeminiStreamEvent.Completed -> {
-                            AppLogger.i(AppLogger.TAG_VM, "Поток: событие Completed (${event.totalDurationMs}мс)")
                             typewriter.markStreamEnded()
                             withContext(Dispatchers.Main.immediate) {
                                 handleDiscreteEvent(assistantMessageId, event)
@@ -626,13 +627,13 @@ class ChatViewModel @JvmOverloads constructor(
                 )
                 is GeminiStreamEvent.ThinkingCompleted -> currentMsg.copy(
                     isThinkingActive = false,
-                    isThinkingExpanded = false,
+                    // КРИТИЧНО: Не закрываем аккордеон здесь! TypewriterEngine еще печатает мысли на экране
                     hasThoughts = true,
                     thinkingDurationMs = currentMsg.thinkingDurationMs + event.durationMs
                 )
                 is GeminiStreamEvent.ContentStarted -> currentMsg.copy(
                     isThinkingActive = false,
-                    isThinkingExpanded = false
+                    isThinkingExpanded = false // Закрываем аккордеон только когда текст ответа фактически пошел
                 )
                 is GeminiStreamEvent.SearchQueriesDiscovered -> currentMsg.copy(
                     searchQueries = (currentMsg.searchQueries + event.queries).distinct()
@@ -664,7 +665,7 @@ class ChatViewModel @JvmOverloads constructor(
         AppLogger.d(AppLogger.TAG_VM, "finalizeAssistantMessage: id=$assistantMessageId, reason=$reason")
         _uiState.update { state ->
             val filteredMessages = state.messages.filterNot { msg ->
-                msg.id == assistantMessageId && msg.text.isEmpty() && msg.thoughtText.isEmpty()
+                msg.id == assistantMessageId && msg.text.isBlank() && msg.thoughtText.isBlank()
             }
             state.copy(
                 isGenerating = false,
@@ -683,7 +684,7 @@ class ChatViewModel @JvmOverloads constructor(
         AppLogger.e(AppLogger.TAG_VM, "handleApiError: [${error.googleErrorCode}] ${error.userFriendlyMessage} (Retry: ${error.retryAfterSeconds}s)")
         _uiState.update { state ->
             val filteredMessages = state.messages.filterNot { msg ->
-                msg.id == assistantMessageId && msg.text.isEmpty() && msg.thoughtText.isEmpty()
+                msg.id == assistantMessageId && msg.text.isBlank() && msg.thoughtText.isBlank()
             }
             val finalizedMessages = filteredMessages.map { msg ->
                 if (msg.id == assistantMessageId) {

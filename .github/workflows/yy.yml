@@ -1,0 +1,239 @@
+name: Verify ClientG Stack Versions
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  check-versions:
+    name: Audit & Verify Remote Dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Deep Repository Version Audit
+        id: run_audit
+        run: |
+          python3 - << 'EOF'
+          import urllib.request
+          import xml.etree.ElementTree as ET
+          import json
+          import os
+          import sys
+
+          # Список проверяемых компонентов стека ClientG
+          COMPONENTS = [
+              {
+                  "category": "Build System",
+                  "name": "Gradle",
+                  "our_version": "9.7.1",
+                  "type": "gradle_api",
+                  "url": "https://services.gradle.org/versions/all",
+                  "check_url": "https://services.gradle.org/distributions/gradle-9.7.1-bin.zip",
+                  "repo": "Gradle Services"
+              },
+              {
+                  "category": "Build System",
+                  "name": "Android Gradle Plugin (AGP)",
+                  "our_version": "9.5.0-alpha04",
+                  "type": "maven_meta",
+                  "url": "https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/maven-metadata.xml",
+                  "repo": "Google Maven"
+              },
+              {
+                  "category": "Language",
+                  "name": "Kotlin Compiler / Stdlib",
+                  "our_version": "2.4.20-RC3",
+                  "type": "maven_meta",
+                  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/maven-metadata.xml",
+                  "repo": "Maven Central"
+              },
+              {
+                  "category": "Android UI",
+                  "name": "Compose BOM",
+                  "our_version": "2026.08.00",
+                  "type": "maven_meta",
+                  "url": "https://dl.google.com/dl/android/maven2/androidx/compose/compose-bom/maven-metadata.xml",
+                  "repo": "Google Maven"
+              },
+              {
+                  "category": "Android UI",
+                  "name": "Activity Compose",
+                  "our_version": "1.14.0-alpha01",
+                  "type": "maven_meta",
+                  "url": "https://dl.google.com/dl/android/maven2/androidx/activity/activity-compose/maven-metadata.xml",
+                  "repo": "Google Maven"
+              },
+              {
+                  "category": "Android UI",
+                  "name": "Compose Material 3",
+                  "our_version": "1.5.0-alpha27",
+                  "type": "maven_meta",
+                  "url": "https://dl.google.com/dl/android/maven2/androidx/compose/material3/material3/maven-metadata.xml",
+                  "repo": "Google Maven"
+              },
+              {
+                  "category": "Async",
+                  "name": "Kotlinx Coroutines",
+                  "our_version": "1.11.0",
+                  "type": "maven_meta",
+                  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core/maven-metadata.xml",
+                  "repo": "Maven Central"
+              },
+              {
+                  "category": "Serialization",
+                  "name": "Kotlinx Serialization",
+                  "our_version": "1.12.0-RC",
+                  "type": "maven_meta",
+                  "url": "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-serialization-json/maven-metadata.xml",
+                  "repo": "Maven Central"
+              },
+              {
+                  "category": "Networking",
+                  "name": "Ktor Client (Core & CIO)",
+                  "our_version": "3.5.2",
+                  "type": "maven_meta",
+                  "url": "https://repo1.maven.org/maven2/io/ktor/ktor-client-core/maven-metadata.xml",
+                  "repo": "Maven Central"
+              },
+              {
+                  "category": "Security",
+                  "name": "AndroidX Security Crypto",
+                  "our_version": "1.1.0",
+                  "type": "maven_meta",
+                  "url": "https://dl.google.com/dl/android/maven2/androidx/security/security-crypto/maven-metadata.xml",
+                  "repo": "Google Maven"
+              },
+              {
+                  "category": "AI SDK",
+                  "name": "Google GenAI SDK",
+                  "our_version": "1.70.0",
+                  "type": "maven_meta",
+                  "url": "https://repo1.maven.org/maven2/com/google/genai/google-genai/maven-metadata.xml",
+                  "repo": "Maven Central"
+              }
+          ]
+
+          headers = {"User-Agent": "ClientG-Version-Auditor/1.0"}
+
+          results = []
+
+          for c in COMPONENTS:
+              our_ver = c["our_version"]
+              repo_name = c["repo"]
+              latest_ver = "Unknown"
+              status = "❌ Failed"
+
+              try:
+                  if c["type"] == "gradle_api":
+                      req = urllib.request.Request(c["url"], headers=headers)
+                      with urllib.request.urlopen(req, timeout=10) as response:
+                          data = json.loads(response.read().decode("utf-8"))
+                          for item in data:
+                              if not item.get("snapshot") and not item.get("nightly"):
+                                  latest_ver = item.get("version")
+                                  break
+                          status = "✅ Verified Online"
+                  elif c["type"] == "maven_meta":
+                      req = urllib.request.Request(c["url"], headers=headers)
+                      with urllib.request.urlopen(req, timeout=10) as response:
+                          xml_content = response.read()
+                          root = ET.fromstring(xml_content)
+                          versioning = root.find("versioning")
+                          if versioning is not None:
+                              release = versioning.find("release")
+                              latest = versioning.find("latest")
+                              if latest is not None and latest.text:
+                                  latest_ver = latest.text
+                              elif release is not None and release.text:
+                                  latest_ver = release.text
+                              else:
+                                  versions = versioning.find("versions")
+                                  if versions is not None and len(versions) > 0:
+                                      latest_ver = versions[-1].text
+                          status = "✅ Verified Online"
+              except Exception as e:
+                  status = f"⚠️ HTTP Error: {str(e)[:25]}"
+
+              results.append({
+                  "category": c["category"],
+                  "name": c["name"],
+                  "our_version": our_ver,
+                  "latest_repo_version": latest_ver,
+                  "status": status,
+                  "repo": repo_name,
+                  "url": c.get("url", "")
+              })
+
+          # Формирование итогового Markdown отчета
+          md_lines = []
+          md_lines.append("# 📦 Сводный отчет верификации версий (ClientG Stack)")
+          md_lines.append("")
+          md_lines.append("Прямой аудит выполнен к официальным реестрам: Google Maven, Maven Central, Gradle Services.")
+          md_lines.append("")
+          md_lines.append("| Категория | Компонент | Версия в проекте | Последний релиз в репо | Статус сети | Репозиторий |")
+          md_lines.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
+
+          for r in results:
+              md_lines.append(f"| **{r['category']}** | {r['name']} | `{r['our_version']}` | `{r['latest_repo_version']}` | {r['status']} | [{r['repo']}]({r['url']}) |")
+
+          md_lines.append("")
+          md_lines.append("### Архитектурные метаданные:")
+          md_lines.append("- **Целевая платформа:** Android 16 (API 36)")
+          md_lines.append("- **Минимальный SDK:** Android 14 (API 34)")
+          md_lines.append("- **Целевое устройство:** Samsung Galaxy S23 Ultra (Snapdragon 8 Gen 2 for Galaxy)")
+          md_lines.append("- **Модель Gemini:** `gemini-3.8-flash` (Endpoint `v1beta`)")
+          md_lines.append("")
+
+          content = "\n".join(md_lines)
+
+          # Запись в VERSIONS.md
+          with open("VERSIONS.md", "w", encoding="utf-8") as f:
+              f.write(content)
+
+          # Запись в GitHub Step Summary
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as f:
+                  f.write(content)
+
+          print("Аудит успешно завершен. Файл VERSIONS.md сформирован.")
+          EOF
+
+      - name: Upload Audit Report Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClientG-Versions-Audit
+          path: VERSIONS.md
+          retention-days: 14
+
+      - name: Commit Updated VERSIONS.md to Repository
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSIONS.md
+          if git diff --staged --quiet; then
+            echo "VERSIONS.md не изменился, коммит не требуется."
+          else
+            git commit -m "chore(audit): обновить отчет актуальных версий VERSIONS.md"
+            git push || echo "Не удалось сделать push (возможно, ветка защищена или нет прав записи)."
+          fi

@@ -54,6 +54,9 @@ sealed interface MarkdownBlock {
     ) : MarkdownBlock
 }
 
+// Оптимизация: регулярное выражение скомпилировано один раз на уровне файла
+private val ORDERED_LIST_REGEX = Regex("^(\\d+)\\.\\s+(.*)$")
+
 // ====================================================================
 // 2. Инкрементальный FSM-парсер (CommonMark 0.31.2 Stream Compliant)
 // ====================================================================
@@ -79,21 +82,16 @@ fun parseStreamingMarkdown(input: String): List<MarkdownBlock> {
         }
     }
 
-    val orderedListRegex = Regex("^(\\d+)\\.\\s+(.*)$")
-
     for (line in lines) {
         val trimmedLine = line.trim()
 
-        // 1. Обработка открывающих / закрывающих апострофов блока кода
         if (trimmedLine.startsWith("```")) {
             if (!inCodeBlock) {
-                // Вход в блок кода
                 flushParagraph()
                 inCodeBlock = true
                 codeLanguage = trimmedLine.removePrefix("```").trim()
                 codeBuffer.setLength(0)
             } else {
-                // Штатный выход из блока кода
                 inCodeBlock = false
                 blocks.add(
                     MarkdownBlock.CodeBlock(
@@ -108,19 +106,17 @@ fun parseStreamingMarkdown(input: String): List<MarkdownBlock> {
             continue
         }
 
-        // 2. Накопление строк внутри активного блока кода
         if (inCodeBlock) {
             codeBuffer.append(line).append("\n")
             continue
         }
 
-        // 3. Обработка обычного текста вне кода
         if (trimmedLine.isEmpty()) {
             flushParagraph()
             continue
         }
 
-        val orderedMatch = orderedListRegex.find(trimmedLine)
+        val orderedMatch = ORDERED_LIST_REGEX.find(trimmedLine)
 
         when {
             trimmedLine.startsWith("###### ") -> {
@@ -164,7 +160,6 @@ fun parseStreamingMarkdown(input: String): List<MarkdownBlock> {
         }
     }
 
-    // Если стрим оборвался, а блок кода еще не закрыт (isComplete = false)
     if (inCodeBlock) {
         blocks.add(
             MarkdownBlock.CodeBlock(
@@ -213,7 +208,6 @@ fun highlightCodeSyntax(code: String, language: String): AnnotatedString {
 
             var i = 0
             while (i < codePart.length) {
-                // Подсветка строк "..."
                 if (codePart[i] == '"') {
                     val endQuote = codePart.indexOf('"', i + 1)
                     val strEnd = if (endQuote != -1) endQuote + 1 else codePart.length
@@ -224,7 +218,6 @@ fun highlightCodeSyntax(code: String, language: String): AnnotatedString {
                     continue
                 }
 
-                // Подсветка слов (ключевые слова и типы)
                 if (codePart[i].isLetter() || codePart[i] == '_') {
                     val start = i
                     while (i < codePart.length && (codePart[i].isLetterOrDigit() || codePart[i] == '_')) {
@@ -243,7 +236,6 @@ fun highlightCodeSyntax(code: String, language: String): AnnotatedString {
                 i++
             }
 
-            // Подсветка комментариев //
             if (commentPart.isNotEmpty()) {
                 withStyle(SpanStyle(color = Color(0xFF546E7A), fontStyle = FontStyle.Italic)) {
                     append(commentPart)
@@ -382,7 +374,6 @@ fun StreamingCodeBlockCard(block: MarkdownBlock.CodeBlock) {
     val codeScrollState = rememberScrollState()
     val horizontalScroll = rememberScrollState()
 
-    // Автопрокрутка вниз по мере наполнения кодового окна во время печати
     LaunchedEffect(block.code.length, block.isComplete) {
         if (!block.isComplete) {
             codeScrollState.scrollTo(codeScrollState.maxValue)

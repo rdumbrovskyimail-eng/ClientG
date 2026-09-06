@@ -65,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.clientg.network.ChatRole
 import com.clientg.network.GroundingSource
+import com.clientg.network.InlineCitation
 import com.clientg.network.TextAttachment
 import com.clientg.network.ThinkingLevel
 import com.clientg.presentation.ChatUiSideEffect
@@ -100,14 +101,12 @@ private val CodeBlockHeaderBg = Color(0xFF121212)
 private val InlineCodeBg = Color(0xFF222222)
 private val InlineCodeText = Color(0xFFFFD54F)
 
-// Дефект №15: Вынос форм в неизменяемые константы для исключения GC-аллокаций на 120 Гц
 private val BubbleUserShape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp)
 private val CardStandardShape = RoundedCornerShape(14.dp)
 private val CodeBlockShape = RoundedCornerShape(12.dp)
 private val ChipStandardShape = RoundedCornerShape(12.dp)
 private val InputBarCapsuleShape = RoundedCornerShape(26.dp)
 
-// Дефект №16: Отключение платформенного padding шрифтов для идеального выравнивания базовых линий
 private val DefaultTextStyle = TextStyle(
     platformStyle = PlatformTextStyle(includeFontPadding = false)
 )
@@ -238,7 +237,6 @@ fun ChatGptScreen(
         }
     }
 
-    // Дефект №1: Следящий автоскролл в реальном времени при генерации текста
     val lastMessage = uiState.messages.lastOrNull()
     LaunchedEffect(lastMessage?.text?.length, lastMessage?.thoughtText?.length) {
         if (lastMessage?.isStreaming == true && isAtBottom && uiState.messages.isNotEmpty()) {
@@ -286,7 +284,6 @@ fun ChatGptScreen(
         uri?.let { viewModel.onAttachFileUri(it) }
     }
 
-    // Дефект №8 (Cutout) и Дефект №14 (Overdraw): displayCutoutPadding и отсутствие дублирующего фона
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -337,7 +334,6 @@ fun ChatGptScreen(
                             ChatMessageItem(
                                 message = message,
                                 onToggleThinking = { viewModel.onToggleThinkingAccordion(message.id) },
-                                // Дефект №7: Строгая валидация схем при открытии URL (OWASP Intent Security)
                                 onOpenUrl = { url ->
                                     runCatching {
                                         val uri = Uri.parse(url)
@@ -352,9 +348,7 @@ fun ChatGptScreen(
                                         }
                                     }
                                 },
-                                // Дефект №2: Адресный повтор выбранного сообщения через onRetryMessage
                                 onRegenerate = { viewModel.onRetryMessage(message.id) },
-                                // Дефект №8: Передача FLAG_ACTIVITY_NEW_TASK в Intent.createChooser
                                 onShareText = { textToShare ->
                                     val sendIntent = Intent().apply {
                                         action = Intent.ACTION_SEND
@@ -435,7 +429,6 @@ fun ChatGptScreen(
             )
         }
 
-        // Дефект №3: Диалог подтверждения очистки чата
         if (showClearChatDialog) {
             AlertDialog(
                 onDismissRequest = { showClearChatDialog = false },
@@ -634,7 +627,6 @@ private fun ChatTopBar(
         }
 
         Row(verticalAlignment = Alignment.CenterVertically) {
-            // Дефект №17: Соответствие стандарту WCAG 48x48 dp для тач-таргетов
             IconButton(
                 onClick = onClearChat,
                 modifier = Modifier
@@ -767,7 +759,6 @@ private fun ChatMessageItem(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            // Дефект №18: Объединение дочерних узлов доступности TalkBack для непрерывного чтения
             .semantics(mergeDescendants = true) {},
         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
     ) {
@@ -940,7 +931,6 @@ private fun ThinkingAccordionCard(
     isExpanded: Boolean,
     onToggle: () -> Unit
 ) {
-    // Дефект №5: Безусловное объявление rememberInfiniteTransition на верхнем уровне слотов Compose
     val infiniteTransition = rememberInfiniteTransition(label = "ThinkingPulse")
     val animatedAlpha by infiniteTransition.animateFloat(
         initialValue = 0.35f,
@@ -1016,7 +1006,6 @@ private fun ThinkingAccordionCard(
                 Column(modifier = Modifier.padding(top = 10.dp)) {
                     HorizontalDivider(color = ThinkingBorder, thickness = 0.5.dp)
                     Spacer(modifier = Modifier.height(8.dp))
-                    // Дефект №4: Разрешение выделения и копирования текста размышлений
                     SelectionContainer {
                         Text(
                             text = thoughtText.ifEmpty { "Анализ контекста и синтез ответа..." },
@@ -1108,7 +1097,6 @@ private fun SearchGroundingBlock(
             }
         }
 
-        // Дефект №16: Отображение поисковых подсказок Google Search Suggestions
         if (!searchSuggestions.isNullOrBlank()) {
             Spacer(modifier = Modifier.height(6.dp))
             Surface(
@@ -1137,7 +1125,7 @@ private fun SearchGroundingBlock(
 @Composable
 private fun NativeMarkdownContent(
     text: String,
-    citations: List<com.clientg.network.InlineCitation>,
+    citations: List<InlineCitation>,
     onOpenUrl: (String) -> Unit
 ) {
     val blocks = remember(text) { parseMarkdownBlocks(text) }
@@ -1175,7 +1163,6 @@ private fun NativeMarkdownContent(
                         )
                     }
                 }
-                // Дефект №15: Поддержка нумерованных списков
                 is MarkdownBlock.NumberedItem -> {
                     Row(modifier = Modifier.padding(start = 4.dp)) {
                         Text(text = "${block.number}. ", color = SearchActiveText, fontSize = 15.sp, fontWeight = FontWeight.Bold, style = DefaultTextStyle)
@@ -1201,6 +1188,33 @@ private fun NativeMarkdownContent(
                 }
                 is MarkdownBlock.Code -> {
                     CodeBlockCard(language = block.language, content = block.content)
+                }
+            }
+        }
+
+        // Интерактивные бейджи цитирования источников
+        if (citations.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .horizontalScroll(rememberScrollState())
+                    .padding(top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                citations.distinctBy { it.source.url }.forEachIndexed { idx, citation ->
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = AmoledSurface,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF282828)),
+                        modifier = Modifier.clickable { onOpenUrl(citation.source.url) }
+                    ) {
+                        Text(
+                            text = "[${idx + 1}] ${citation.source.title}",
+                            color = SearchActiveText,
+                            fontSize = 11.sp,
+                            style = DefaultTextStyle,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
                 }
             }
         }
@@ -1236,7 +1250,6 @@ private fun CodeBlockCard(language: String, content: String) {
         colors = CardDefaults.cardColors(containerColor = CodeBlockBg)
     ) {
         Column {
-            // Дефект №4: Изоляция кнопок действий внутри SelectionContainer
             DisableSelection {
                 Row(
                     modifier = Modifier
@@ -1292,7 +1305,6 @@ private fun CodeBlockCard(language: String, content: String) {
                 }
             }
 
-            // Дефект №13: Ограничение высоты карточки кода для предотвращения фризов рендеринга
             Text(
                 text = content,
                 color = Color(0xFFE0E0E0),
@@ -1318,7 +1330,6 @@ private sealed interface MarkdownBlock {
     data class Code(val language: String, val content: String) : MarkdownBlock
 }
 
-// Дефект №15: Устойчивый парсинг заборов кода без обрыва на строковых литералах с бэктиками
 private fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
     val blocks = mutableListOf<MarkdownBlock>()
     val fence = "```"
@@ -1358,20 +1369,28 @@ private fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
     return blocks
 }
 
+// НЮАНС 4: Допуск до 3 ведущих пробелов перед забором кода по CommonMark 0.31.2
 private fun findFenceIndex(input: String, fromIndex: Int): Int {
     var idx = fromIndex
     while (idx < input.length) {
         val found = input.indexOf("```", idx)
         if (found == -1) return -1
-        if (found == 0 || input[found - 1] == '\n') {
-            return found
+        var checkIdx = found - 1
+        var leadingSpaces = 0
+        while (checkIdx >= 0 && input[checkIdx] == ' ') {
+            checkIdx--
+            leadingSpaces++
+        }
+        if (checkIdx < 0 || input[checkIdx] == '\n') {
+            if (leadingSpaces <= 3) {
+                return found
+            }
         }
         idx = found + 3
     }
     return -1
 }
 
-// Дефект №15: Парсинг нумерованных списков и корректные мягкие переносы (soft breaks)
 private fun parseLinesIntoBlocks(text: String, out: MutableList<MarkdownBlock>) {
     val lines = text.lines()
     val paragraphBuffer = StringBuilder()
@@ -1420,7 +1439,6 @@ private fun parseLinesIntoBlocks(text: String, out: MutableList<MarkdownBlock>) 
     flushParagraph()
 }
 
-// Дефект №6 (Кликабельные ссылки LinkAnnotation) и Дефект №9 (Flanking правила для звездочек)
 private fun parseInlineMarkdown(text: String, onOpenUrl: (String) -> Unit): AnnotatedString {
     return buildAnnotatedString {
         var i = 0
@@ -1468,7 +1486,6 @@ private fun parseInlineMarkdown(text: String, onOpenUrl: (String) -> Unit): Anno
                 }
             }
 
-            // Дефект №9: Flanking-правило для курсива (пропуск звездочек в формулах 2 * a + 3 * b)
             if (text[i] == '*') {
                 val hasRightSpace = i + 1 < text.length && text[i + 1].isWhitespace()
                 val nextStar = text.indexOf('*', i + 1)
@@ -1485,7 +1502,7 @@ private fun parseInlineMarkdown(text: String, onOpenUrl: (String) -> Unit): Anno
                 }
             }
 
-            // Дефект №6: Поддержка интерактивных кликабельных ссылок через LinkAnnotation
+            // НЮАНС 2: Роутинг кликов в onOpenUrl через linkInteractionListener
             if (text.startsWith("[", i)) {
                 val closeBracket = text.indexOf(']', i + 1)
                 val openParen = if (closeBracket != -1) text.indexOf('(', closeBracket) else -1
@@ -1504,7 +1521,8 @@ private fun parseInlineMarkdown(text: String, onOpenUrl: (String) -> Unit): Anno
                                     textDecoration = TextDecoration.Underline,
                                     fontWeight = FontWeight.Medium
                                 )
-                            )
+                            ),
+                            linkInteractionListener = { _ -> onOpenUrl(linkUrl) }
                         )
                     ) {
                         append(linkTitle)
@@ -1554,7 +1572,6 @@ private fun AttachmentChipsBar(
                         style = DefaultTextStyle
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    // Дефект №17: Увеличение тач-зоны крестика удаления вложения
                     IconButton(
                         onClick = { onRemove(att) },
                         modifier = Modifier
@@ -1625,6 +1642,7 @@ fun ChatGptInputBar(
     val coroutineScope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    val inputScrollState = rememberScrollState()
 
     val sendButtonBg by animateColorAsState(
         targetValue = if (isGenerating) Color.White else if (isSendEnabled) Color.White else Color(0xFF333333),
@@ -1689,7 +1707,6 @@ fun ChatGptInputBar(
 
         Spacer(modifier = Modifier.width(8.dp))
 
-        // Дефект №10: Убран конфликтующий внешний verticalScroll, мешавший скроллу курсора BasicTextField
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -1707,11 +1724,13 @@ fun ChatGptInputBar(
                 )
             }
 
+            // НЮАНС 3: Скролл verticalScroll(inputScrollState) навешан прямо на BasicTextField
             BasicTextField(
                 value = text,
                 onValueChange = onTextChanged,
                 modifier = Modifier
                     .fillMaxWidth()
+                    .verticalScroll(inputScrollState)
                     .onFocusEvent { event ->
                         if (event.isFocused) {
                             coroutineScope.launch { bringIntoViewRequester.bringIntoView() }
@@ -1739,7 +1758,6 @@ fun ChatGptInputBar(
                 ),
                 keyboardActions = KeyboardActions(
                     onSend = {
-                        // Дефект №18: Сброс предиктивного буфера клавиатуры после отправки
                         if (isSendEnabled) {
                             onSendMessage()
                             focusManager.clearFocus()
@@ -1848,7 +1866,6 @@ private fun ApiKeyDialog(
             }
         },
         confirmButton = {
-            // Дефект №5: Блокировка сохранения пустого ключа
             Button(
                 onClick = { if (isKeyValid) onSave(key.trim()) },
                 enabled = isKeyValid,

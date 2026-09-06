@@ -27,7 +27,7 @@ import java.io.IOException
 import kotlin.math.ceil
 
 // ====================================================================
-// 1. Предметные контракты доменного слоя (Domain Models & Events)
+// 1. Доменные контракты (Domain Contracts)
 // ====================================================================
 
 enum class ThinkingLevel(val apiValue: String) {
@@ -41,19 +41,12 @@ enum class ChatRole(val apiValue: String) {
     MODEL("model")
 }
 
-/**
- * Элемент истории беседы.
- * Хранит очищенный фактологический текст для сохранения 90% скидки Implicit Context Caching.
- */
 data class ChatMessage(
     val role: ChatRole,
     val text: String,
     val attachments: List<TextAttachment> = emptyList()
 )
 
-/**
- * Валидированное текстовое вложение (.txt, .log, исходный код).
- */
 data class TextAttachment(
     val fileName: String,
     val content: String,
@@ -64,12 +57,12 @@ data class TextAttachment(
             "Вложение '$fileName' не может быть пустым."
         }
         require(content.length <= MAX_ATTACHMENT_CHARS) {
-            "Размер файла '$fileName' превышает допустимый лимит (${MAX_ATTACHMENT_CHARS / 1024} КБ)."
+            "Размер файла '$fileName' превышает лимит (${MAX_ATTACHMENT_CHARS / 1024} КБ)."
         }
     }
 
     companion object {
-        const val MAX_ATTACHMENT_CHARS = 1_500_000 // Лимит до ~375k токенов на файл
+        const val MAX_ATTACHMENT_CHARS = 1_500_000 // Безопасный объем для контекстного окна 1M токенов
     }
 }
 
@@ -95,9 +88,6 @@ enum class FinishReason {
     UNKNOWN
 }
 
-/**
- * Высокоточная шкала потоковых событий для рендеринга на 120 FPS.
- */
 sealed interface GeminiStreamEvent {
     data object Connecting : GeminiStreamEvent
     data object ThinkingStarted : GeminiStreamEvent
@@ -144,7 +134,7 @@ class GeminiApiException(
 
 @Serializable
 private data class GeminiWireRequest(
-    @SerialName("systemInstruction") val systemInstruction: SystemInstructionDto,
+    @SerialName("systemInstruction") val systemInstruction: SystemInstructionDto? = null,
     val contents: List<ContentDto>,
     @SerialName("generationConfig") val generationConfig: GenerationConfigDto,
     val tools: List<ToolDto>? = null,
@@ -309,12 +299,6 @@ class GeminiClient(
             "Используй чистый Markdown, оформляй код в блоки с указанием языка синтаксиса. " +
             "При включенном поиске опирайся на свежие авторитетные источники."
 
-        private val RECOGNIZED_CODE_EXTENSIONS = setOf(
-            "kt", "kts", "java", "py", "json", "xml", "cpp", "c", "h", "hpp",
-            "html", "css", "js", "ts", "sql", "sh", "bash", "md", "yaml", "yml",
-            "toml", "properties", "gradle"
-        )
-
         fun createDefaultHttpClient(): HttpClient = HttpClient(CIO) {
             engine {
                 maxConnectionsCount = 32
@@ -348,7 +332,7 @@ class GeminiClient(
         ignoreUnknownKeys = true
         isLenient = true
         encodeDefaults = true
-        explicitNulls = false // Предотвращает отправку "tools": null
+        explicitNulls = false // Исключает отправку null-полей (защита от 400 Bad Request)
     }
 
     fun streamContent(
@@ -376,12 +360,12 @@ class GeminiClient(
             val startTime = System.currentTimeMillis()
             val endpointUrl = "$BASE_URL/$modelName:streamGenerateContent?alt=sse"
 
-            // 1. Формирование сырого списка ходов диалога
+            // 1. Формирование истории: экранирование вложений через XML-контейнеры Google DeepMind
             val rawTurns = ArrayList<ContentDto>(history.size + 1)
             for (msg in history) {
                 val historyParts = buildList {
                     msg.attachments.forEach { att ->
-                        add(PartDto("=== ВЛОЖЕННЫЙ ФАЙЛ: ${att.fileName} ===\n${att.content}\n=== КОНЕЦ ФАЙЛА ==="))
+                        add(PartDto("<attachment name=\"${att.fileName}\">\n${att.content}\n</attachment>"))
                     }
                     if (msg.text.isNotBlank()) {
                         add(PartDto(msg.text))
@@ -392,11 +376,10 @@ class GeminiClient(
                 }
             }
 
-            // 2. Формирование текущего пользовательского хода
+            // 2. Формирование текущего хода пользователя
             val currentParts = buildList {
                 attachments.forEach { att ->
-                    val fence = if (att.extension in RECOGNIZED_CODE_EXTENSIONS) att.extension else ""
-                    add(PartDto("=== ПРИКРЕПЛЕННЫЙ ФАЙЛ: ${att.fileName} ===\n```$fence\n${att.content}\n```\n=================================="))
+                    add(PartDto("<attachment name=\"${att.fileName}\">\n${att.content}\n</attachment>"))
                 }
                 if (prompt.isNotBlank()) {
                     add(PartDto(prompt))
@@ -412,12 +395,12 @@ class GeminiClient(
             }
             rawTurns.add(ContentDto(role = ChatRole.USER.apiValue, parts = currentParts))
 
-            // 3. Отсечение приветствий от model в начале диалога (защита от ошибки 400 Google API)
+            // 3. Отсечение сообщений model в начале диалога (требование Google API)
             while (rawTurns.isNotEmpty() && rawTurns.first().role != ChatRole.USER.apiValue) {
                 rawTurns.removeAt(0)
             }
 
-            // 4. Склеивание подряд идущих ходов с одинаковой ролью
+            // 4. Склеивание подряд идущих ходов одной роли
             val sanitizedContents = ArrayList<ContentDto>(rawTurns.size)
             for (turn in rawTurns) {
                 val last = sanitizedContents.lastOrNull()
@@ -431,9 +414,15 @@ class GeminiClient(
                 }
             }
 
-            // 5. Сборка Wire-запроса
+            // 5. Безопасная сборка системной инструкции (null если пустая)
+            val systemDto = if (systemInstruction.isNotBlank()) {
+                SystemInstructionDto(listOf(PartDto(systemInstruction)))
+            } else {
+                null
+            }
+
             val requestBody = GeminiWireRequest(
-                systemInstruction = SystemInstructionDto(listOf(PartDto(systemInstruction))),
+                systemInstruction = systemDto,
                 contents = sanitizedContents,
                 generationConfig = GenerationConfigDto(
                     maxOutputTokens = 65536,
@@ -453,7 +442,7 @@ class GeminiClient(
             var isThinkingPhase = false
             var hasContentStarted = false
             var currentThinkingStartTime = 0L
-            var currentThinkingChars = 0
+            var totalThoughtChars = 0
 
             val discoveredQueries = mutableSetOf<String>()
             val discoveredSourceUrls = mutableSetOf<String>()
@@ -462,10 +451,12 @@ class GeminiClient(
             var emittedSearchEntryPoint = false
             var finalFinishReason = FinishReason.UNKNOWN
 
-            // 6. Сетевой вызов через Ktor CIO с изоляцией сетевых ошибок
+            // 6. Сетевой вызов с защитой от буферизации прокси (Accept: text/event-stream)
             try {
                 httpClient.preparePost(endpointUrl) {
                     header("x-goog-api-key", apiKey)
+                    header(HttpHeaders.Accept, "text/event-stream")
+                    header(HttpHeaders.CacheControl, "no-cache")
                     contentType(ContentType.Application.Json)
                     setBody(serializedJson)
                 }.execute { httpResponse ->
@@ -479,6 +470,7 @@ class GeminiClient(
                         val bodyRetrySeconds = extractRetryDelaySeconds(parsedError)
                         val retrySeconds = headerRetrySeconds ?: bodyRetrySeconds
 
+                        val rawFallback = errorBody.take(300).trim()
                         val message = when (httpResponse.status) {
                             HttpStatusCode.TooManyRequests -> {
                                 if (retrySeconds != null) {
@@ -490,9 +482,11 @@ class GeminiClient(
                             HttpStatusCode.Unauthorized, HttpStatusCode.Forbidden ->
                                 "Неверный API-ключ Gemini или доступ запрещен."
                             HttpStatusCode.BadRequest ->
-                                parsedError?.message ?: "Некорректные параметры запроса."
+                                parsedError?.message?.takeIf { it.isNotBlank() }
+                                    ?: rawFallback.ifBlank { "Некорректные параметры запроса." }
                             else ->
-                                parsedError?.message ?: "Ошибка сервера Google (${httpResponse.status.value})."
+                                parsedError?.message?.takeIf { it.isNotBlank() }
+                                    ?: rawFallback.ifBlank { "Ошибка сервера Google (${httpResponse.status.value})." }
                         }
 
                         throw GeminiApiException(
@@ -504,18 +498,11 @@ class GeminiClient(
                     }
 
                     val channel: ByteReadChannel = httpResponse.bodyAsChannel()
+                    val sseEventDataBuffer = StringBuilder()
 
-                    // 7. Построчный разбор SSE-потока
-                    while (!channel.isClosedForRead) {
-                        currentCoroutineContext().ensureActive()
-
-                        val rawLine = channel.readUTF8Line() ?: break
-                        val line = rawLine.trim()
-
-                        if (!line.startsWith("data:")) continue
-
-                        val dataPayload = line.removePrefix("data:").trimStart()
-                        if (dataPayload.isEmpty() || dataPayload == "[DONE]") continue
+                    // Обработка неделимого W3C JSON-пакета
+                    suspend fun processCompleteSsePayload(dataPayload: String) {
+                        if (dataPayload.isEmpty() || dataPayload == "[DONE]") return
 
                         try {
                             val chunk = json.decodeFromString(GeminiResponseChunk.serializer(), dataPayload)
@@ -560,7 +547,7 @@ class GeminiClient(
                                 }
                             }
 
-                            // Сбор источников поиска с защитой от дублирования индексов
+                            // Обработка поиска Google Search Grounding
                             candidate?.groundingMetadata?.let { meta ->
                                 meta.webSearchQueries?.let { queries ->
                                     val newQueries = queries.filter { discoveredQueries.add(it) }
@@ -599,24 +586,27 @@ class GeminiClient(
                                     }
                                 }
 
-                                // Привязка уникальных цитат
+                                // Точечные сноски: обработка всех индексов без потерь
                                 meta.groundingSupports?.let { supports ->
                                     if (accumulatedGroundingChunks.isNotEmpty()) {
-                                        val citations = supports.mapNotNull { sup ->
-                                            val seg = sup.segment ?: return@mapNotNull null
-                                            val srcIndex = sup.groundingChunkIndices?.firstOrNull() ?: return@mapNotNull null
-                                            val chunkItem = accumulatedGroundingChunks.getOrNull(srcIndex) ?: return@mapNotNull null
-                                            val web = chunkItem.web ?: return@mapNotNull null
-                                            val uri = web.uri ?: return@mapNotNull null
+                                        val citations = supports.flatMap { sup ->
+                                            val seg = sup.segment ?: return@flatMap emptyList<InlineCitation>()
+                                            val indices = sup.groundingChunkIndices ?: return@flatMap emptyList<InlineCitation>()
 
-                                            InlineCitation(
-                                                startIndex = seg.startIndex,
-                                                endIndex = seg.endIndex,
-                                                source = GroundingSource(
-                                                    title = web.title?.takeIf { it.isNotBlank() } ?: uri,
-                                                    url = uri
+                                            indices.mapNotNull { srcIndex ->
+                                                val chunkItem = accumulatedGroundingChunks.getOrNull(srcIndex) ?: return@mapNotNull null
+                                                val web = chunkItem.web ?: return@mapNotNull null
+                                                val uri = web.uri ?: return@mapNotNull null
+
+                                                InlineCitation(
+                                                    startIndex = seg.startIndex,
+                                                    endIndex = seg.endIndex,
+                                                    source = GroundingSource(
+                                                        title = web.title?.takeIf { it.isNotBlank() } ?: uri,
+                                                        url = uri
+                                                    )
                                                 )
-                                            )
+                                            }
                                         }
                                         val uniqueCitations = citations.filter { discoveredCitations.add(it) }
                                         if (uniqueCitations.isNotEmpty()) {
@@ -635,7 +625,7 @@ class GeminiClient(
                                 }
                             }
 
-                            // Управление фазами рассуждений и контента
+                            // Разделение мыслей и полезного текста
                             candidate?.content?.parts?.forEach { part ->
                                 val text = part.text ?: return@forEach
                                 if (text.isEmpty()) return@forEach
@@ -644,16 +634,15 @@ class GeminiClient(
                                     if (!isThinkingPhase) {
                                         isThinkingPhase = true
                                         currentThinkingStartTime = System.currentTimeMillis()
-                                        currentThinkingChars = 0
                                         emit(GeminiStreamEvent.ThinkingStarted)
                                     }
-                                    currentThinkingChars += text.length
+                                    totalThoughtChars += text.length
                                     emit(GeminiStreamEvent.ThinkingDelta(text))
                                 } else {
                                     if (isThinkingPhase) {
                                         isThinkingPhase = false
                                         val duration = (System.currentTimeMillis() - currentThinkingStartTime).coerceAtLeast(0L)
-                                        emit(GeminiStreamEvent.ThinkingCompleted(duration, currentThinkingChars))
+                                        emit(GeminiStreamEvent.ThinkingCompleted(duration, totalThoughtChars))
                                     }
                                     if (!hasContentStarted) {
                                         hasContentStarted = true
@@ -663,7 +652,7 @@ class GeminiClient(
                                 }
                             }
 
-                            // Метрики токенизации и кэша
+                            // Учет токенизации и эффективности кэша
                             chunk.usageMetadata?.let { usage ->
                                 val cached = usage.cachedContentTokenCount
                                 val promptTotal = usage.promptTokenCount
@@ -686,13 +675,46 @@ class GeminiClient(
                         } catch (e: GeminiApiException) {
                             throw e
                         } catch (_: Exception) {
-                            // Игнорируем промежуточный шум
+                            // Игнорируем транспортные шумы
                         }
+                    }
+
+                    // 7. Полноценный W3C EventBuffer парсинг
+                    while (!channel.isClosedForRead) {
+                        currentCoroutineContext().ensureActive()
+
+                        val rawLine = channel.readUTF8Line() ?: break
+                        val line = rawLine.trim()
+
+                        if (line.isEmpty()) {
+                            // Граница события SSE (\n\n)
+                            if (sseEventDataBuffer.isNotEmpty()) {
+                                val completePayload = sseEventDataBuffer.toString()
+                                sseEventDataBuffer.setLength(0)
+                                processCompleteSsePayload(completePayload)
+                            }
+                            continue
+                        }
+
+                        if (line.startsWith("data:")) {
+                            val dataPart = line.removePrefix("data:").trimStart()
+                            if (sseEventDataBuffer.isNotEmpty()) {
+                                sseEventDataBuffer.append("\n")
+                            }
+                            sseEventDataBuffer.append(dataPart)
+                        }
+                    }
+
+                    // Обработка финального остатка буфера
+                    if (sseEventDataBuffer.isNotEmpty()) {
+                        val remainingPayload = sseEventDataBuffer.toString()
+                        sseEventDataBuffer.setLength(0)
+                        processCompleteSsePayload(remainingPayload)
                     }
 
                     if (isThinkingPhase) {
                         val duration = (System.currentTimeMillis() - currentThinkingStartTime).coerceAtLeast(0L)
-                        emit(GeminiStreamEvent.ThinkingCompleted(duration, currentThinkingChars))
+                        emit(GeminiStreamEvent.ThinkingCompleted(duration, totalThoughtChars))
                     }
 
                     val totalDuration = (System.currentTimeMillis() - startTime).coerceAtLeast(0L)

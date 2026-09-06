@@ -214,7 +214,7 @@ class TypewriterEngine(
     }
 
     /**
-     * Ожидание физического импульса VSYNC экрана от аппаратного хоста Android.
+     * Безопасное ожидание VSYNC экрана с защитой от двойного resume при отмене.
      */
     private suspend fun awaitDisplayFrame(): Long {
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -224,7 +224,9 @@ class TypewriterEngine(
 
         return suspendCancellableCoroutine { continuation ->
             val callback = Choreographer.FrameCallback { frameTimeNanos ->
-                continuation.resume(frameTimeNanos)
+                if (continuation.isActive) {
+                    continuation.resume(frameTimeNanos)
+                }
             }
             Choreographer.getInstance().postFrameCallback(callback)
             continuation.invokeOnCancellation {

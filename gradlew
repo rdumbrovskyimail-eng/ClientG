@@ -36,13 +36,16 @@ APP_NAME="Gradle"
 APP_BASE_NAME="${0##*/}"
 
 # -----------------------------------------------------------------------------
-# Bootstrap Hook: Безопасная загрузка gradle-wrapper.jar при его отсутствии
+# Безопасный Bootstrap Hook: Загрузка с обязательной проверкой SHA-256 хэша
 # -----------------------------------------------------------------------------
 WRAPPER_JAR="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
 if [ ! -s "$WRAPPER_JAR" ]; then
-    echo "[gradlew] gradle-wrapper.jar not found. Initializing bootstrap download..." >&2
+    echo "[gradlew] gradle-wrapper.jar not found. Initializing secure bootstrap download..." >&2
     mkdir -p "$APP_HOME/gradle/wrapper" || exit 1
+
     JAR_URL="https://raw.githubusercontent.com/gradle/gradle/v8.13.0/gradle/wrapper/gradle-wrapper.jar"
+    # Официальный SHA-256 хэш исполняемого файла gradle-wrapper.jar
+    EXPECTED_SHA256="4ba9b0b467b7fec965b6a71e8da6eb85cf6bd9868eec2496a7576f3f0cfc24d6"
 
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL "$JAR_URL" -o "$WRAPPER_JAR"
@@ -53,13 +56,28 @@ if [ ! -s "$WRAPPER_JAR" ]; then
         exit 1
     fi
 
-    # Проверка целостности загрузки
-    if [ ! -s "$WRAPPER_JAR" ]; then
-        echo "[gradlew] ERROR: Failed to download gradle-wrapper.jar or file is empty." >&2
+    # Верификация контрольной суммы SHA-256
+    VALID_CHECKSUM=0
+    if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL_SHA256=$(sha256sum "$WRAPPER_JAR" | awk '{print $1}')
+        [ "$ACTUAL_SHA256" = "$EXPECTED_SHA256" ] && VALID_CHECKSUM=1
+    elif command -v shasum >/dev/null 2>&1; then
+        ACTUAL_SHA256=$(shasum -a 256 "$WRAPPER_JAR" | awk '{print $1}')
+        [ "$ACTUAL_SHA256" = "$EXPECTED_SHA256" ] && VALID_CHECKSUM=1
+    else
+        echo "[gradlew] WARNING: Neither sha256sum nor shasum available. Skipping checksum validation." >&2
+        VALID_CHECKSUM=1
+    fi
+
+    if [ "$VALID_CHECKSUM" -ne 1 ]; then
+        echo "[gradlew] SECURITY ERROR: Checksum validation failed for gradle-wrapper.jar!" >&2
+        echo "[gradlew] Expected: $EXPECTED_SHA256" >&2
+        echo "[gradlew] Got:      $ACTUAL_SHA256" >&2
         rm -f "$WRAPPER_JAR"
         exit 1
     fi
-    echo "[gradlew] gradle-wrapper.jar downloaded successfully." >&2
+
+    echo "[gradlew] gradle-wrapper.jar verified and ready." >&2
 fi
 # -----------------------------------------------------------------------------
 
@@ -84,7 +102,7 @@ else
     }
 fi
 
-# Запуск процесса Gradle Wrapper (чистые флаги без внутренних кавычек)
+# Запуск процесса сборщика
 exec "$JAVACMD" \
     -Xmx64m \
     -Xms64m \

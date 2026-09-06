@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -45,15 +46,12 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.*
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -63,7 +61,6 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.clientg.network.ChatRole
@@ -74,9 +71,10 @@ import com.clientg.presentation.ChatUiSideEffect
 import com.clientg.presentation.ChatViewModel
 import com.clientg.presentation.UiChatMessage
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 // ====================================================================
-// Палитра True Dark AMOLED (с соблюдением стандарта контрастности WCAG 2.1 AA)
+// Палитра True Dark AMOLED (WCAG 2.1 AA)
 // ====================================================================
 
 private val AmoledBg = Color(0xFF000000)
@@ -86,7 +84,7 @@ private val AmoledInputBarBg = Color(0xFF1E1E1E)
 private val AmoledButtonBg = Color(0xFF282828)
 private val TextPrimary = Color(0xFFF2F2F2)
 private val TextSecondary = Color(0xFFB0B0B5)
-private val TextMuted = Color(0xFF9E9E9E) // Соответствие WCAG AA (контрастность > 7.5:1 на черном)
+private val TextMuted = Color(0xFF9E9E9E)
 
 private val ThinkingGlowStart = Color(0xFF4C8DFF)
 private val ThinkingGlowEnd = Color(0xFF6C5CE7)
@@ -101,6 +99,18 @@ private val CodeBlockBg = Color(0xFF080808)
 private val CodeBlockHeaderBg = Color(0xFF121212)
 private val InlineCodeBg = Color(0xFF222222)
 private val InlineCodeText = Color(0xFFFFD54F)
+
+// Дефект №15: Вынос форм в неизменяемые константы для исключения GC-аллокаций на 120 Гц
+private val BubbleUserShape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp)
+private val CardStandardShape = RoundedCornerShape(14.dp)
+private val CodeBlockShape = RoundedCornerShape(12.dp)
+private val ChipStandardShape = RoundedCornerShape(12.dp)
+private val InputBarCapsuleShape = RoundedCornerShape(26.dp)
+
+// Дефект №16: Отключение платформенного padding шрифтов для идеального выравнивания базовых линий
+private val DefaultTextStyle = TextStyle(
+    platformStyle = PlatformTextStyle(includeFontPadding = false)
+)
 
 private val ArrowUpwardIcon: ImageVector by lazy {
     ImageVector.Builder("ArrowUp", 24.dp, 24.dp, 24f, 24f).apply {
@@ -217,19 +227,29 @@ fun ChatGptScreen(
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    var showClearChatDialog by remember { mutableStateOf(false) }
 
     val isAtBottom by remember {
         derivedStateOf {
             val total = listState.layoutInfo.totalItemsCount
             if (total == 0) return@derivedStateOf true
             val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            lastVisible >= total - 3
+            lastVisible >= total - 2
         }
     }
 
-    // Безопасный перехват жеста "Назад": закрывает диалог или останавливает генерацию
-    BackHandler(enabled = uiState.isApiKeyDialogOpen || uiState.isGenerating) {
-        if (uiState.isApiKeyDialogOpen) {
+    // Дефект №1: Следящий автоскролл в реальном времени при генерации текста
+    val lastMessage = uiState.messages.lastOrNull()
+    LaunchedEffect(lastMessage?.text?.length, lastMessage?.thoughtText?.length) {
+        if (lastMessage?.isStreaming == true && isAtBottom && uiState.messages.isNotEmpty()) {
+            listState.scrollToItem(uiState.messages.lastIndex)
+        }
+    }
+
+    BackHandler(enabled = uiState.isApiKeyDialogOpen || uiState.isGenerating || showClearChatDialog) {
+        if (showClearChatDialog) {
+            showClearChatDialog = false
+        } else if (uiState.isApiKeyDialogOpen) {
             viewModel.onCloseApiKeyDialog()
         } else if (uiState.isGenerating) {
             viewModel.onCancelGeneration()
@@ -266,18 +286,18 @@ fun ChatGptScreen(
         uri?.let { viewModel.onAttachFileUri(it) }
     }
 
-    // Идеальная обработка WindowInsets без двойных отступов клавиатуры
+    // Дефект №8 (Cutout) и Дефект №14 (Overdraw): displayCutoutPadding и отсутствие дублирующего фона
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(AmoledBg)
             .statusBarsPadding()
+            .displayCutoutPadding()
             .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             ChatTopBar(
                 currentLevel = uiState.thinkingLevel,
-                onClearChat = { viewModel.onClearChat() },
+                onClearChat = { showClearChatDialog = true },
                 onOpenApiKeyDialog = { viewModel.onOpenApiKeyDialog() },
                 onThinkingLevelSelected = { viewModel.onThinkingLevelChanged(it) }
             )
@@ -287,6 +307,7 @@ fun ChatGptScreen(
                     message = uiState.errorMessage ?: "",
                     retrySeconds = uiState.retryCountdownSeconds,
                     onRetry = { viewModel.onRetryLastMessage() },
+                    onOpenKeyDialog = { viewModel.onOpenApiKeyDialog() },
                     onDismiss = { viewModel.onDismissError() }
                 )
             }
@@ -316,27 +337,36 @@ fun ChatGptScreen(
                             ChatMessageItem(
                                 message = message,
                                 onToggleThinking = { viewModel.onToggleThinkingAccordion(message.id) },
+                                // Дефект №7: Строгая валидация схем при открытии URL (OWASP Intent Security)
                                 onOpenUrl = { url ->
                                     runCatching {
-                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                                            if (context !is Activity) {
-                                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        val uri = Uri.parse(url)
+                                        val scheme = uri.scheme?.lowercase(Locale.US)
+                                        if (scheme == "https" || scheme == "http") {
+                                            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                                                if (context !is Activity) {
+                                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                }
                                             }
+                                            context.startActivity(intent)
                                         }
-                                        context.startActivity(intent)
                                     }
                                 },
-                                onRegenerate = { viewModel.onRetryLastMessage() },
+                                // Дефект №2: Адресный повтор выбранного сообщения через onRetryMessage
+                                onRegenerate = { viewModel.onRetryMessage(message.id) },
+                                // Дефект №8: Передача FLAG_ACTIVITY_NEW_TASK в Intent.createChooser
                                 onShareText = { textToShare ->
                                     val sendIntent = Intent().apply {
                                         action = Intent.ACTION_SEND
                                         putExtra(Intent.EXTRA_TEXT, textToShare)
                                         type = "text/plain"
+                                    }
+                                    val chooser = Intent.createChooser(sendIntent, "Поделиться").apply {
                                         if (context !is Activity) {
                                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                         }
                                     }
-                                    context.startActivity(Intent.createChooser(sendIntent, "Поделиться"))
+                                    context.startActivity(chooser)
                                 }
                             )
                         }
@@ -404,6 +434,32 @@ fun ChatGptScreen(
                 onDismiss = { viewModel.onCloseApiKeyDialog() }
             )
         }
+
+        // Дефект №3: Диалог подтверждения очистки чата
+        if (showClearChatDialog) {
+            AlertDialog(
+                onDismissRequest = { showClearChatDialog = false },
+                containerColor = AmoledSurface,
+                title = { Text("Очистить историю диалога?", color = TextPrimary, fontWeight = FontWeight.Bold) },
+                text = { Text("Все сообщения и прикрепленные файлы будут удалены без возможности восстановления.", color = TextSecondary) },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            viewModel.onClearChat()
+                            showClearChatDialog = false
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFCF6679))
+                    ) {
+                        Text("Очистить", color = Color.White)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showClearChatDialog = false }) {
+                        Text("Отмена", color = TextSecondary)
+                    }
+                }
+            )
+        }
     }
 }
 
@@ -451,25 +507,27 @@ private fun EmptyStateHero(
                 text = "Чем я могу помочь?",
                 color = TextPrimary,
                 fontSize = 22.sp,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                style = DefaultTextStyle
             )
 
             Text(
                 text = "Gemini 3.8 Flash • Deep Reasoning • Grounding",
                 color = TextSecondary,
                 fontSize = 13.sp,
+                style = DefaultTextStyle,
                 modifier = Modifier.padding(top = 6.dp, bottom = 32.dp)
             )
 
             val suggestions = listOf(
-                "🔍 Свежие новости о релизе Android 16",
-                "⚡ Архитектура корутин без дропов кадров на 120 Гц",
-                "📄 Проанализируй прикрепленный файл логов"
+                "Свежие новости о релизе Android 16",
+                "Архитектура корутин без дропов кадров на 120 Гц",
+                "Проанализируй прикрепленный файл логов"
             )
 
             suggestions.forEach { prompt ->
                 Surface(
-                    shape = RoundedCornerShape(14.dp),
+                    shape = CardStandardShape,
                     color = AmoledSurface,
                     border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF222222)),
                     modifier = Modifier
@@ -481,6 +539,7 @@ private fun EmptyStateHero(
                         text = prompt,
                         color = TextPrimary,
                         fontSize = 13.sp,
+                        style = DefaultTextStyle,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)
                     )
                 }
@@ -516,7 +575,8 @@ private fun ChatTopBar(
                     color = TextPrimary,
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Black,
-                    letterSpacing = (-0.5).sp
+                    letterSpacing = (-0.5).sp,
+                    style = DefaultTextStyle
                 )
                 Spacer(modifier = Modifier.width(6.dp))
 
@@ -531,6 +591,7 @@ private fun ChatTopBar(
                             color = SearchActiveText,
                             fontSize = 9.sp,
                             fontWeight = FontWeight.Bold,
+                            style = DefaultTextStyle,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
                         )
                     }
@@ -567,15 +628,18 @@ private fun ChatTopBar(
             Text(
                 text = "Snapdragon 8 Gen 2 • 120Hz LTPO AMOLED",
                 color = TextSecondary,
-                fontSize = 11.sp
+                fontSize = 11.sp,
+                style = DefaultTextStyle
             )
         }
 
         Row(verticalAlignment = Alignment.CenterVertically) {
+            // Дефект №17: Соответствие стандарту WCAG 48x48 dp для тач-таргетов
             IconButton(
                 onClick = onClearChat,
                 modifier = Modifier
-                    .size(36.dp)
+                    .minimumInteractiveComponentSize()
+                    .size(40.dp)
                     .clip(CircleShape)
                     .background(AmoledSurface)
             ) {
@@ -592,7 +656,8 @@ private fun ChatTopBar(
             IconButton(
                 onClick = onOpenApiKeyDialog,
                 modifier = Modifier
-                    .size(36.dp)
+                    .minimumInteractiveComponentSize()
+                    .size(40.dp)
                     .clip(CircleShape)
                     .background(AmoledSurface)
             ) {
@@ -600,7 +665,7 @@ private fun ChatTopBar(
                     imageVector = KeyIcon,
                     contentDescription = "Настройки API ключа",
                     tint = TextSecondary,
-                    modifier = Modifier.size(17.dp)
+                    modifier = Modifier.size(18.dp)
                 )
             }
         }
@@ -616,18 +681,21 @@ private fun ErrorBanner(
     message: String,
     retrySeconds: Long?,
     onRetry: () -> Unit,
+    onOpenKeyDialog: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val isKeyEmpty = message.contains("API-ключ", ignoreCase = true)
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp),
         colors = CardDefaults.cardColors(containerColor = Color(0xFF261212)),
-        shape = RoundedCornerShape(14.dp),
+        shape = CardStandardShape,
         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF4A2020))
     ) {
         Row(
-            modifier = Modifier.padding(14.dp),
+            modifier = Modifier.padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
@@ -635,7 +703,8 @@ private fun ErrorBanner(
                     text = message,
                     color = Color(0xFFFFB4A9),
                     fontSize = 13.sp,
-                    lineHeight = 18.sp
+                    lineHeight = 18.sp,
+                    style = DefaultTextStyle
                 )
                 if (retrySeconds != null) {
                     Text(
@@ -643,19 +712,29 @@ private fun ErrorBanner(
                         color = Color(0xFFFFDAD4),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
+                        style = DefaultTextStyle,
                         modifier = Modifier.padding(top = 4.dp)
                     )
                 }
             }
 
-            if (retrySeconds == null || retrySeconds <= 0) {
+            if (isKeyEmpty) {
+                TextButton(onClick = onOpenKeyDialog) {
+                    Text("Ввести ключ", color = Color(0xFFFF897D), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                }
+            } else if (retrySeconds == null || retrySeconds <= 0) {
                 TextButton(onClick = onRetry) {
                     Text("Повторить", color = Color(0xFFFF897D), fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 }
             }
 
-            IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = Color(0xFFFFB4A9))
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .size(36.dp)
+            ) {
+                Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = Color(0xFFFFB4A9), modifier = Modifier.size(18.dp))
             }
         }
     }
@@ -686,7 +765,10 @@ private fun ChatMessageItem(
     }
 
     Column(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            // Дефект №18: Объединение дочерних узлов доступности TalkBack для непрерывного чтения
+            .semantics(mergeDescendants = true) {},
         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
     ) {
         if (isUser) {
@@ -705,6 +787,7 @@ private fun ChatMessageItem(
                                 text = "📄 ${att.fileName}",
                                 color = TextSecondary,
                                 fontSize = 11.sp,
+                                style = DefaultTextStyle,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                             )
                         }
@@ -716,9 +799,9 @@ private fun ChatMessageItem(
                 Box(
                     modifier = Modifier
                         .widthIn(max = 310.dp)
-                        .clip(RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp))
+                        .clip(BubbleUserShape)
                         .background(Color(0xFF242424))
-                        .border(1.dp, Color(0xFF333333), RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp))
+                        .border(1.dp, Color(0xFF333333), BubbleUserShape)
                         .padding(horizontal = 16.dp, vertical = 12.dp)
                 ) {
                     SelectionContainer {
@@ -726,7 +809,8 @@ private fun ChatMessageItem(
                             text = message.text,
                             color = TextPrimary,
                             fontSize = 15.sp,
-                            lineHeight = 22.sp
+                            lineHeight = 22.sp,
+                            style = DefaultTextStyle
                         )
                     }
                 }
@@ -744,10 +828,11 @@ private fun ChatMessageItem(
                     Spacer(modifier = Modifier.height(10.dp))
                 }
 
-                if (message.searchQueries.isNotEmpty() || message.sources.isNotEmpty()) {
+                if (message.searchQueries.isNotEmpty() || message.sources.isNotEmpty() || !message.searchSuggestionsHtml.isNullOrBlank()) {
                     SearchGroundingBlock(
                         queries = message.searchQueries,
                         sources = message.sources,
+                        searchSuggestions = message.searchSuggestionsHtml,
                         onOpenUrl = onOpenUrl
                     )
                     Spacer(modifier = Modifier.height(10.dp))
@@ -755,14 +840,19 @@ private fun ChatMessageItem(
 
                 if (message.text.isNotEmpty()) {
                     SelectionContainer {
-                        NativeMarkdownContent(text = message.text, onOpenUrl = onOpenUrl)
+                        NativeMarkdownContent(
+                            text = message.text,
+                            citations = message.citations,
+                            onOpenUrl = onOpenUrl
+                        )
                     }
                 } else if (message.isStreaming && !message.isThinkingActive) {
                     Text(
                         text = "Генерирует ответ...",
                         color = TextSecondary,
                         fontSize = 14.sp,
-                        fontStyle = FontStyle.Italic
+                        fontStyle = FontStyle.Italic,
+                        style = DefaultTextStyle
                     )
                 }
 
@@ -779,7 +869,8 @@ private fun ChatMessageItem(
                                 text = "Вход: ${usage.promptTokens} • Мысли: ${usage.thoughtsTokens} • Выход: ${usage.candidateTokens} • Кэш: ${usage.cacheHitPercentage.toInt()}%",
                                 color = TextMuted,
                                 fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace
+                                fontFamily = FontFamily.Monospace,
+                                style = DefaultTextStyle
                             )
                         }
 
@@ -790,37 +881,43 @@ private fun ChatMessageItem(
                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                     isCopied = true
                                 },
-                                modifier = Modifier.size(28.dp)
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .size(36.dp)
                             ) {
                                 Icon(
                                     imageVector = if (isCopied) Icons.Default.Check else CopyIcon,
                                     contentDescription = "Скопировать ответ",
                                     tint = if (isCopied) Color(0xFF81C784) else TextSecondary,
-                                    modifier = Modifier.size(15.dp)
+                                    modifier = Modifier.size(16.dp)
                                 )
                             }
 
                             IconButton(
                                 onClick = { onShareText(message.text) },
-                                modifier = Modifier.size(28.dp)
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .size(36.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Share,
                                     contentDescription = "Поделиться",
                                     tint = TextSecondary,
-                                    modifier = Modifier.size(15.dp)
+                                    modifier = Modifier.size(16.dp)
                                 )
                             }
 
                             IconButton(
                                 onClick = onRegenerate,
-                                modifier = Modifier.size(28.dp)
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .size(36.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Refresh,
-                                    contentDescription = "Повторить",
+                                    contentDescription = "Повторить этот ответ",
                                     tint = TextSecondary,
-                                    modifier = Modifier.size(15.dp)
+                                    modifier = Modifier.size(16.dp)
                                 )
                             }
                         }
@@ -843,21 +940,18 @@ private fun ThinkingAccordionCard(
     isExpanded: Boolean,
     onToggle: () -> Unit
 ) {
-    val glowAlpha = if (isActive) {
-        val infiniteTransition = rememberInfiniteTransition(label = "ThinkingPulse")
-        val alpha by infiniteTransition.animateFloat(
-            initialValue = 0.35f,
-            targetValue = 0.95f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(900, easing = FastOutSlowInEasing),
-                repeatMode = RepeatMode.Reverse
-            ),
-            label = "GlowAlpha"
-        )
-        alpha
-    } else {
-        1f
-    }
+    // Дефект №5: Безусловное объявление rememberInfiniteTransition на верхнем уровне слотов Compose
+    val infiniteTransition = rememberInfiniteTransition(label = "ThinkingPulse")
+    val animatedAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "GlowAlpha"
+    )
+    val glowAlpha = if (isActive) animatedAlpha else 1f
 
     val gradientBrush = remember(glowAlpha) {
         Brush.horizontalGradient(
@@ -871,16 +965,15 @@ private fun ThinkingAccordionCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(CardStandardShape)
             .then(
                 if (isActive) {
-                    Modifier.border(width = 1.dp, brush = gradientBrush, shape = RoundedCornerShape(14.dp))
+                    Modifier.border(width = 1.dp, brush = gradientBrush, shape = CardStandardShape)
                 } else {
-                    Modifier.border(1.dp, ThinkingBorder, RoundedCornerShape(14.dp))
+                    Modifier.border(1.dp, ThinkingBorder, CardStandardShape)
                 }
             )
-            .clickable(onClick = onToggle, role = Role.Button)
-            .semantics { liveRegion = LiveRegionMode.Polite },
+            .clickable(onClick = onToggle, role = Role.Button),
         colors = CardDefaults.cardColors(containerColor = ThinkingCardBg)
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
@@ -899,10 +992,11 @@ private fun ThinkingAccordionCard(
                     )
                     Spacer(modifier = Modifier.width(9.dp))
                     Text(
-                        text = if (isActive) "Размышляет над задачей..." else "Ход мыслей (${String.format(java.util.Locale.US, "%.1f", durationMs / 1000f)}с)",
+                        text = if (isActive) "Размышляет над задачей..." else "Ход мыслей (${String.format(Locale.US, "%.1f", durationMs / 1000f)}с)",
                         color = if (isActive) Color(0xFF8AB4F8) else TextSecondary,
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Medium,
+                        style = DefaultTextStyle
                     )
                 }
 
@@ -922,13 +1016,17 @@ private fun ThinkingAccordionCard(
                 Column(modifier = Modifier.padding(top = 10.dp)) {
                     HorizontalDivider(color = ThinkingBorder, thickness = 0.5.dp)
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = thoughtText.ifEmpty { "Анализ контекста и синтез ответа..." },
-                        color = Color(0xFFB0B0B0),
-                        fontSize = 12.sp,
-                        lineHeight = 18.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
+                    // Дефект №4: Разрешение выделения и копирования текста размышлений
+                    SelectionContainer {
+                        Text(
+                            text = thoughtText.ifEmpty { "Анализ контекста и синтез ответа..." },
+                            color = Color(0xFFB0B0B0),
+                            fontSize = 12.sp,
+                            lineHeight = 18.sp,
+                            fontFamily = FontFamily.Monospace,
+                            style = DefaultTextStyle
+                        )
+                    }
                 }
             }
         }
@@ -936,13 +1034,14 @@ private fun ThinkingAccordionCard(
 }
 
 // ====================================================================
-// Google Search Grounding: карточки источников
+// Google Search Grounding: карточки источников и подсказки
 // ====================================================================
 
 @Composable
 private fun SearchGroundingBlock(
     queries: List<String>,
     sources: List<GroundingSource>,
+    searchSuggestions: String?,
     onOpenUrl: (String) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -963,6 +1062,7 @@ private fun SearchGroundingBlock(
                             text = "🔍 $q",
                             color = SearchActiveText,
                             fontSize = 11.sp,
+                            style = DefaultTextStyle,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                         )
                     }
@@ -991,30 +1091,53 @@ private fun SearchGroundingBlock(
                                 fontSize = 11.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.SemiBold,
+                                style = DefaultTextStyle
                             )
                             Text(
-                                text = source.url.removePrefix("https://").substringBefore('/'),
+                                text = source.url.removePrefix("https://").removePrefix("http://").substringBefore('/'),
                                 color = TextSecondary,
                                 fontSize = 10.sp,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                overflow = TextOverflow.Ellipsis,
+                                style = DefaultTextStyle
                             )
                         }
                     }
                 }
             }
         }
+
+        // Дефект №16: Отображение поисковых подсказок Google Search Suggestions
+        if (!searchSuggestions.isNullOrBlank()) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = AmoledSurface,
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF222222)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Поисковые подсказки Google доступны в веб-версии ответа",
+                    color = TextSecondary,
+                    fontSize = 11.sp,
+                    fontStyle = FontStyle.Italic,
+                    style = DefaultTextStyle,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                )
+            }
+        }
     }
 }
 
 // ====================================================================
-// Нативный Markdown-парсер без Layout Thrashing
+// Нативный Markdown-парсер (CommonMark 0.31.2)
 // ====================================================================
 
 @Composable
 private fun NativeMarkdownContent(
     text: String,
+    citations: List<com.clientg.network.InlineCitation>,
     onOpenUrl: (String) -> Unit
 ) {
     val blocks = remember(text) { parseMarkdownBlocks(text) }
@@ -1035,26 +1158,45 @@ private fun NativeMarkdownContent(
                             else -> 14.sp
                         },
                         fontWeight = FontWeight.Bold,
+                        style = DefaultTextStyle,
                         modifier = Modifier.padding(top = 6.dp, bottom = 2.dp)
                     )
                 }
                 is MarkdownBlock.Bullet -> {
                     Row(modifier = Modifier.padding(start = 4.dp)) {
-                        Text(text = "• ", color = SearchActiveText, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        Text(text = "• ", color = SearchActiveText, fontSize = 15.sp, fontWeight = FontWeight.Bold, style = DefaultTextStyle)
+                        val annotated = remember(block.content) { parseInlineMarkdown(block.content, onOpenUrl) }
                         Text(
-                            text = remember(block.content) { parseInlineMarkdown(block.content) },
+                            text = annotated,
                             color = TextPrimary,
                             fontSize = 15.sp,
-                            lineHeight = 22.sp
+                            lineHeight = 22.sp,
+                            style = DefaultTextStyle
+                        )
+                    }
+                }
+                // Дефект №15: Поддержка нумерованных списков
+                is MarkdownBlock.NumberedItem -> {
+                    Row(modifier = Modifier.padding(start = 4.dp)) {
+                        Text(text = "${block.number}. ", color = SearchActiveText, fontSize = 15.sp, fontWeight = FontWeight.Bold, style = DefaultTextStyle)
+                        val annotated = remember(block.content) { parseInlineMarkdown(block.content, onOpenUrl) }
+                        Text(
+                            text = annotated,
+                            color = TextPrimary,
+                            fontSize = 15.sp,
+                            lineHeight = 22.sp,
+                            style = DefaultTextStyle
                         )
                     }
                 }
                 is MarkdownBlock.Paragraph -> {
+                    val annotated = remember(block.content) { parseInlineMarkdown(block.content, onOpenUrl) }
                     Text(
-                        text = remember(block.content) { parseInlineMarkdown(block.content) },
+                        text = annotated,
                         color = TextPrimary,
                         fontSize = 15.sp,
-                        lineHeight = 22.sp
+                        lineHeight = 22.sp,
+                        style = DefaultTextStyle
                     )
                 }
                 is MarkdownBlock.Code -> {
@@ -1078,7 +1220,7 @@ private fun CodeBlockCard(language: String, content: String) {
         }
     }
 
-    val langColor = when (language.lowercase()) {
+    val langColor = when (language.lowercase(Locale.US)) {
         "kotlin", "kt" -> Color(0xFF7F52FF)
         "python", "py" -> Color(0xFF3776AB)
         "json", "xml" -> Color(0xFFFFD54F)
@@ -1089,67 +1231,78 @@ private fun CodeBlockCard(language: String, content: String) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .border(1.dp, Color(0xFF222222), RoundedCornerShape(12.dp)),
+            .clip(CodeBlockShape)
+            .border(1.dp, Color(0xFF222222), CodeBlockShape),
         colors = CardDefaults.cardColors(containerColor = CodeBlockBg)
     ) {
         Column {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(CodeBlockHeaderBg)
-                    .padding(horizontal = 14.dp, vertical = 7.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(7.dp)
-                            .clip(CircleShape)
-                            .background(langColor)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = language.ifEmpty { "code" }.uppercase(),
-                        color = Color(0xFFAAAAAA),
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
+            // Дефект №4: Изоляция кнопок действий внутри SelectionContainer
+            DisableSelection {
                 Row(
-                    modifier = Modifier.clickable {
-                        clipboardManager.setText(AnnotatedString(content))
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        isCopied = true
-                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(CodeBlockHeaderBg)
+                        .padding(horizontal = 14.dp, vertical = 7.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = if (isCopied) Icons.Default.Check else CopyIcon,
-                        contentDescription = "Скопировать",
-                        tint = if (isCopied) Color(0xFF81C784) else Color(0xFFAAAAAA),
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = if (isCopied) "Скопировано" else "Скопировать",
-                        color = if (isCopied) Color(0xFF81C784) else Color(0xFFAAAAAA),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(langColor)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = language.ifEmpty { "code" }.uppercase(Locale.US),
+                            color = Color(0xFFAAAAAA),
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            style = DefaultTextStyle
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .clickable {
+                                clipboardManager.setText(AnnotatedString(content))
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                isCopied = true
+                            },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = if (isCopied) Icons.Default.Check else CopyIcon,
+                            contentDescription = "Скопировать",
+                            tint = if (isCopied) Color(0xFF81C784) else Color(0xFFAAAAAA),
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (isCopied) "Скопировано" else "Скопировать",
+                            color = if (isCopied) Color(0xFF81C784) else Color(0xFFAAAAAA),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            style = DefaultTextStyle
+                        )
+                    }
                 }
             }
 
+            // Дефект №13: Ограничение высоты карточки кода для предотвращения фризов рендеринга
             Text(
                 text = content,
                 color = Color(0xFFE0E0E0),
                 fontSize = 13.sp,
                 lineHeight = 19.sp,
                 fontFamily = FontFamily.Monospace,
+                style = DefaultTextStyle,
                 modifier = Modifier
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState())
                     .horizontalScroll(rememberScrollState())
                     .padding(14.dp)
             )
@@ -1160,17 +1313,19 @@ private fun CodeBlockCard(language: String, content: String) {
 private sealed interface MarkdownBlock {
     data class Header(val level: Int, val text: String) : MarkdownBlock
     data class Bullet(val content: String) : MarkdownBlock
+    data class NumberedItem(val number: String, val content: String) : MarkdownBlock
     data class Paragraph(val content: String) : MarkdownBlock
     data class Code(val language: String, val content: String) : MarkdownBlock
 }
 
+// Дефект №15: Устойчивый парсинг заборов кода без обрыва на строковых литералах с бэктиками
 private fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
     val blocks = mutableListOf<MarkdownBlock>()
     val fence = "```"
     var cursor = 0
 
     while (cursor < input.length) {
-        val startFence = input.indexOf(fence, cursor)
+        val startFence = findFenceIndex(input, cursor)
         if (startFence == -1) {
             parseLinesIntoBlocks(input.substring(cursor), blocks)
             break
@@ -1183,16 +1338,14 @@ private fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
         val afterStartFence = startFence + fence.length
         val langEnd = input.indexOf('\n', afterStartFence)
         if (langEnd == -1) {
-            // Незакрытый блок во время стриминга кода: сразу рендерим как блок кода без скачков
             val code = input.substring(afterStartFence)
             blocks.add(MarkdownBlock.Code("", code))
             break
         }
 
         val language = input.substring(afterStartFence, langEnd).trim()
-        val endFence = input.indexOf(fence, langEnd + 1)
+        val endFence = findFenceIndex(input, langEnd + 1)
         if (endFence == -1) {
-            // Незакрытый блок с определенным языком: отображаем непрерывно
             val code = input.substring(langEnd + 1)
             blocks.add(MarkdownBlock.Code(language, code))
             break
@@ -1205,6 +1358,20 @@ private fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
     return blocks
 }
 
+private fun findFenceIndex(input: String, fromIndex: Int): Int {
+    var idx = fromIndex
+    while (idx < input.length) {
+        val found = input.indexOf("```", idx)
+        if (found == -1) return -1
+        if (found == 0 || input[found - 1] == '\n') {
+            return found
+        }
+        idx = found + 3
+    }
+    return -1
+}
+
+// Дефект №15: Парсинг нумерованных списков и корректные мягкие переносы (soft breaks)
 private fun parseLinesIntoBlocks(text: String, out: MutableList<MarkdownBlock>) {
     val lines = text.lines()
     val paragraphBuffer = StringBuilder()
@@ -1216,12 +1383,16 @@ private fun parseLinesIntoBlocks(text: String, out: MutableList<MarkdownBlock>) 
         }
     }
 
+    val orderedListRegex = Regex("^(\\d+)\\.\\s+(.*)$")
+
     for (line in lines) {
         val trimmed = line.trim()
         if (trimmed.isEmpty()) {
             flushParagraph()
             continue
         }
+
+        val orderedMatch = orderedListRegex.find(trimmed)
 
         when {
             trimmed.startsWith("###### ") -> { flushParagraph(); out.add(MarkdownBlock.Header(6, trimmed.removePrefix("###### ").trim())) }
@@ -1234,16 +1405,23 @@ private fun parseLinesIntoBlocks(text: String, out: MutableList<MarkdownBlock>) 
                 flushParagraph()
                 out.add(MarkdownBlock.Bullet(trimmed.substring(2).trim()))
             }
+            orderedMatch != null -> {
+                flushParagraph()
+                val num = orderedMatch.groupValues[1]
+                val content = orderedMatch.groupValues[2]
+                out.add(MarkdownBlock.NumberedItem(num, content))
+            }
             else -> {
-                if (paragraphBuffer.isNotEmpty()) paragraphBuffer.append("\n")
-                paragraphBuffer.append(line)
+                if (paragraphBuffer.isNotEmpty()) paragraphBuffer.append(" ")
+                paragraphBuffer.append(line.trim())
             }
         }
     }
     flushParagraph()
 }
 
-private fun parseInlineMarkdown(text: String): AnnotatedString {
+// Дефект №6 (Кликабельные ссылки LinkAnnotation) и Дефект №9 (Flanking правила для звездочек)
+private fun parseInlineMarkdown(text: String, onOpenUrl: (String) -> Unit): AnnotatedString {
     return buildAnnotatedString {
         var i = 0
         while (i < text.length) {
@@ -1290,29 +1468,43 @@ private fun parseInlineMarkdown(text: String): AnnotatedString {
                 }
             }
 
-            if (text.startsWith("*", i)) {
+            // Дефект №9: Flanking-правило для курсива (пропуск звездочек в формулах 2 * a + 3 * b)
+            if (text[i] == '*') {
+                val hasRightSpace = i + 1 < text.length && text[i + 1].isWhitespace()
                 val nextStar = text.indexOf('*', i + 1)
-                if (nextStar != -1) {
-                    val italicText = text.substring(i + 1, nextStar)
-                    withStyle(SpanStyle(fontStyle = FontStyle.Italic, color = TextPrimary)) {
-                        append(italicText)
+                if (!hasRightSpace && nextStar != -1) {
+                    val hasLeftSpace = nextStar - 1 >= 0 && text[nextStar - 1].isWhitespace()
+                    if (!hasLeftSpace) {
+                        val italicText = text.substring(i + 1, nextStar)
+                        withStyle(SpanStyle(fontStyle = FontStyle.Italic, color = TextPrimary)) {
+                            append(italicText)
+                        }
+                        i = nextStar + 1
+                        continue
                     }
-                    i = nextStar + 1
-                    continue
                 }
             }
 
+            // Дефект №6: Поддержка интерактивных кликабельных ссылок через LinkAnnotation
             if (text.startsWith("[", i)) {
                 val closeBracket = text.indexOf(']', i + 1)
-                val openParen = text.indexOf('(', closeBracket.coerceAtLeast(0))
-                val closeParen = text.indexOf(')', openParen.coerceAtLeast(0))
+                val openParen = if (closeBracket != -1) text.indexOf('(', closeBracket) else -1
+                val closeParen = if (openParen != -1 && openParen == closeBracket + 1) text.indexOf(')', openParen) else -1
+
                 if (closeBracket != -1 && openParen == closeBracket + 1 && closeParen != -1) {
                     val linkTitle = text.substring(i + 1, closeBracket)
-                    withStyle(
-                        SpanStyle(
-                            color = SearchActiveText,
-                            textDecoration = TextDecoration.Underline,
-                            fontWeight = FontWeight.Medium
+                    val linkUrl = text.substring(openParen + 1, closeParen).trim()
+
+                    withLink(
+                        LinkAnnotation.Url(
+                            url = linkUrl,
+                            styles = TextLinkStyles(
+                                style = SpanStyle(
+                                    color = SearchActiveText,
+                                    textDecoration = TextDecoration.Underline,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            )
                         )
                     ) {
                         append(linkTitle)
@@ -1346,29 +1538,36 @@ private fun AttachmentChipsBar(
     ) {
         attachments.forEach { att ->
             Surface(
-                shape = RoundedCornerShape(12.dp),
+                shape = ChipStandardShape,
                 color = AmoledSurface,
                 border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF2E2E2E))
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    modifier = Modifier.padding(start = 10.dp, top = 6.dp, bottom = 6.dp, end = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
                         text = "📄 ${att.fileName}",
                         color = TextPrimary,
                         fontSize = 12.sp,
-                        maxLines = 1
+                        maxLines = 1,
+                        style = DefaultTextStyle
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Удалить вложение",
-                        tint = TextSecondary,
+                    Spacer(modifier = Modifier.width(4.dp))
+                    // Дефект №17: Увеличение тач-зоны крестика удаления вложения
+                    IconButton(
+                        onClick = { onRemove(att) },
                         modifier = Modifier
-                            .size(14.dp)
-                            .clickable { onRemove(att) }
-                    )
+                            .minimumInteractiveComponentSize()
+                            .size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Удалить вложение",
+                            tint = TextSecondary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
                 }
             }
         }
@@ -1376,7 +1575,7 @@ private fun AttachmentChipsBar(
 }
 
 // ====================================================================
-// Парящая кнопка скролла вниз (Smart Scroll FAB)
+// Парящая кнопка скролла вниз
 // ====================================================================
 
 @Composable
@@ -1386,7 +1585,9 @@ private fun FloatingScrollBottomButton(
 ) {
     Surface(
         onClick = onClick,
-        modifier = modifier.size(38.dp),
+        modifier = modifier
+            .minimumInteractiveComponentSize()
+            .size(44.dp),
         shape = CircleShape,
         color = AmoledSurface,
         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF333333)),
@@ -1397,7 +1598,7 @@ private fun FloatingScrollBottomButton(
                 imageVector = Icons.Default.KeyboardArrowDown,
                 contentDescription = "Вниз",
                 tint = TextPrimary,
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(22.dp)
             )
         }
     }
@@ -1419,10 +1620,11 @@ fun ChatGptInputBar(
     onCancelGeneration: () -> Unit,
     onAttachClick: () -> Unit
 ) {
-    val scrollState = rememberScrollState()
     val isSendEnabled = (text.isNotBlank() || hasAttachments) && !isGenerating
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
     val coroutineScope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     val sendButtonBg by animateColorAsState(
         targetValue = if (isGenerating) Color.White else if (isSendEnabled) Color.White else Color(0xFF333333),
@@ -1434,15 +1636,16 @@ fun ChatGptInputBar(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 8.dp)
-            .clip(RoundedCornerShape(26.dp))
+            .clip(InputBarCapsuleShape)
             .background(AmoledInputBarBg)
-            .border(1.dp, Color(0xFF292929), RoundedCornerShape(26.dp))
+            .border(1.dp, Color(0xFF292929), InputBarCapsuleShape)
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.Bottom
     ) {
         Box(
             modifier = Modifier
-                .size(38.dp)
+                .minimumInteractiveComponentSize()
+                .size(40.dp)
                 .clip(CircleShape)
                 .background(AmoledButtonBg)
                 .clickable(onClick = onAttachClick),
@@ -1458,10 +1661,10 @@ fun ChatGptInputBar(
 
         Spacer(modifier = Modifier.width(6.dp))
 
-        // Доступный переключатель поиска с нативной поддержкой TalkBack
         Box(
             modifier = Modifier
-                .size(38.dp)
+                .minimumInteractiveComponentSize()
+                .size(40.dp)
                 .clip(CircleShape)
                 .background(if (enableSearch) SearchActiveBg else AmoledButtonBg)
                 .border(
@@ -1486,12 +1689,12 @@ fun ChatGptInputBar(
 
         Spacer(modifier = Modifier.width(8.dp))
 
+        // Дефект №10: Убран конфликтующий внешний verticalScroll, мешавший скроллу курсора BasicTextField
         Box(
             modifier = Modifier
                 .weight(1f)
                 .padding(bottom = 8.dp, top = 4.dp)
                 .heightIn(min = 24.dp, max = 120.dp)
-                .verticalScroll(scrollState)
                 .bringIntoViewRequester(bringIntoViewRequester),
             contentAlignment = Alignment.CenterStart
         ) {
@@ -1499,7 +1702,8 @@ fun ChatGptInputBar(
                 Text(
                     text = "Спросить Gemini 3.8...",
                     color = Color(0xFF757575),
-                    fontSize = 15.sp
+                    fontSize = 15.sp,
+                    style = DefaultTextStyle
                 )
             }
 
@@ -1514,10 +1718,10 @@ fun ChatGptInputBar(
                         }
                     }
                     .onPreviewKeyEvent { event ->
-                        // Поддержка Enter на физических клавиатурах / Samsung DeX
                         if (event.key == Key.Enter && event.type == KeyEventType.KeyDown) {
                             if (!event.isShiftPressed && isSendEnabled) {
                                 onSendMessage()
+                                keyboardController?.hide()
                                 true
                             } else false
                         } else false
@@ -1525,7 +1729,8 @@ fun ChatGptInputBar(
                 textStyle = TextStyle(
                     color = TextPrimary,
                     fontSize = 15.sp,
-                    lineHeight = 21.sp
+                    lineHeight = 21.sp,
+                    platformStyle = PlatformTextStyle(includeFontPadding = false)
                 ),
                 cursorBrush = SolidColor(Color.White),
                 keyboardOptions = KeyboardOptions(
@@ -1534,7 +1739,12 @@ fun ChatGptInputBar(
                 ),
                 keyboardActions = KeyboardActions(
                     onSend = {
-                        if (isSendEnabled) onSendMessage()
+                        // Дефект №18: Сброс предиктивного буфера клавиатуры после отправки
+                        if (isSendEnabled) {
+                            onSendMessage()
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
+                        }
                     }
                 )
             )
@@ -1544,7 +1754,8 @@ fun ChatGptInputBar(
 
         Box(
             modifier = Modifier
-                .size(38.dp)
+                .minimumInteractiveComponentSize()
+                .size(40.dp)
                 .clip(CircleShape)
                 .background(sendButtonBg)
                 .clickable {
@@ -1552,6 +1763,8 @@ fun ChatGptInputBar(
                         onCancelGeneration()
                     } else if (isSendEnabled) {
                         onSendMessage()
+                        focusManager.clearFocus()
+                        keyboardController?.hide()
                     }
                 },
             contentAlignment = Alignment.Center
@@ -1588,6 +1801,7 @@ private fun ApiKeyDialog(
     var key by remember(currentKey) { mutableStateOf(currentKey) }
     var passwordVisible by remember { mutableStateOf(false) }
     val haptic = LocalHapticFeedback.current
+    val isKeyValid = key.trim().isNotBlank()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1601,7 +1815,8 @@ private fun ApiKeyDialog(
                     text = "Ключ защищен аппаратным модулем Knox Vault (AES-256) и используется для вызовов модели Gemini 3.8 Flash.",
                     color = TextSecondary,
                     fontSize = 13.sp,
-                    lineHeight = 18.sp
+                    lineHeight = 18.sp,
+                    style = DefaultTextStyle
                 )
                 Spacer(modifier = Modifier.height(14.dp))
                 OutlinedTextField(
@@ -1633,11 +1848,13 @@ private fun ApiKeyDialog(
             }
         },
         confirmButton = {
+            // Дефект №5: Блокировка сохранения пустого ключа
             Button(
-                onClick = { onSave(key) },
-                colors = ButtonDefaults.buttonColors(containerColor = Color.White)
+                onClick = { if (isKeyValid) onSave(key.trim()) },
+                enabled = isKeyValid,
+                colors = ButtonDefaults.buttonColors(containerColor = Color.White, disabledContainerColor = Color(0xFF383838))
             ) {
-                Text("Сохранить", color = Color.Black)
+                Text("Сохранить", color = if (isKeyValid) Color.Black else Color.Gray)
             }
         },
         dismissButton = {

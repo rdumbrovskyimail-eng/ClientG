@@ -717,6 +717,15 @@ class GeminiClient(
                         }
                     }
 
+                    // Если модель исчерпала лимит на этапе мыслей и не начала ответ
+                    if (finalFinishReason == FinishReason.MAX_TOKENS && !hasContentStarted) {
+                        hasContentStarted = true
+                        emit(GeminiStreamEvent.ContentStarted)
+                        val limitWarning = "\n\n*(Лимит токенов исчерпан на этапе рассуждений. Попробуйте снизить Thinking Level до MEDIUM или задать более узкий вопрос)*"
+                        accumulatedContentText.append(limitWarning)
+                        emit(GeminiStreamEvent.ContentDelta(limitWarning))
+                    }
+
                     // 2) Метаданные поиска (Grounding)
                     candidate?.groundingMetadata?.let { meta ->
                         meta.webSearchQueries?.let { queries ->

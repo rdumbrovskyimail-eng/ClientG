@@ -576,7 +576,6 @@ class ChatViewModel(
                 isGenerating = false,
                 errorMessage = error.userFriendlyMessage,
                 retryCountdownSeconds = error.retryAfterSeconds,
-                // Удаляем пустой плейсхолдер сообщения, если генерация упала до первого токена
                 messages = state.messages.filterNot { msg ->
                     msg.id == assistantMessageId && msg.text.isEmpty() && msg.thoughtText.isEmpty()
                 }
@@ -611,7 +610,7 @@ class ChatViewModel(
 
     companion object {
         private const val PREF_KEY_API_KEY = "gemini_api_key"
-        private const val UI_BATCH_INTERVAL_MS = 25L // 40 FPS порог для идеальной синхронизации со 120 Гц
+        private const val UI_BATCH_INTERVAL_MS = 25L // 40 FPS порог для плавной работы на 120 Гц
 
         private fun createSafeSharedPreferences(context: Context): SharedPreferences {
             return try {
@@ -625,7 +624,7 @@ class ChatViewModel(
                     EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                     EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
                 )
-            } catch (_: Exception) {
+            } catch (_: Throwable) {
                 context.getSharedPreferences("clientg_prefs_fallback", Context.MODE_PRIVATE)
             }
         }

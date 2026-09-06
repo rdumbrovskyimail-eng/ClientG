@@ -21,11 +21,11 @@ import android.graphics.Color as AndroidColor
  */
 class MainActivity : ComponentActivity() {
 
-    // Инициализация ViewModel через AndroidViewModelFactory (с поддержкой @JvmOverloads)
+    // Инициализация ViewModel через AndroidViewModelFactory
     private val chatViewModel: ChatViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // 1. Аппаратная защита от белого/серого мерцания при холодном старте на AMOLED
+        // 1. Устранение Overdraw: аппаратная заливка окна черным цветом (#000000)
         window.setBackgroundDrawable(ColorDrawable(AndroidColor.BLACK))
 
         // 2. Сквозной режим Edge-to-Edge без системных полос (scrims)
@@ -39,7 +39,7 @@ class MainActivity : ComponentActivity() {
         // 3. Аппаратная конфигурация окна под дисплей Samsung Galaxy S23 Ultra
         configureDisplayWindow()
 
-        // 4. Обработка входящих данных только при первичном запуске (защита от дублирования при повороте)
+        // 4. Обработка входящих данных только при первичном запуске
         if (savedInstanceState == null) {
             handleIncomingIntent(intent)
         }
@@ -57,23 +57,27 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Системный перехват данных, отправленных в ClientG из других приложений.
+     * Дефект №10: Извлечение данных из Intent с обязательной поддержкой Android 13–16 ClipData
      */
     private fun handleIncomingIntent(intent: Intent?) {
         if (intent == null) return
 
         when (intent.action) {
             Intent.ACTION_SEND -> {
+                // Извлечение URI из EXTRA_STREAM либо резервное извлечение из clipData
                 val fileUri: Uri? = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
+                    ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+
                 if (fileUri != null) {
                     chatViewModel.onAttachFileUri(fileUri)
                 }
 
                 val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
+                    ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
+
                 if (!sharedText.isNullOrBlank()) {
                     chatViewModel.onInputTextChanged(sharedText)
                 }
-                // Сбрасываем действие, предотвращая повторную обработку тем же экземпляром
                 intent.action = null
             }
 
@@ -83,8 +87,17 @@ class MainActivity : ComponentActivity() {
                     Intent.EXTRA_STREAM,
                     Uri::class.java
                 )
-                fileUris?.forEach { uri ->
-                    chatViewModel.onAttachFileUri(uri)
+
+                if (!fileUris.isNullOrEmpty()) {
+                    fileUris.forEach { uri -> chatViewModel.onAttachFileUri(uri) }
+                } else {
+                    intent.clipData?.let { clip ->
+                        for (i in 0 until clip.itemCount) {
+                            clip.getItemAt(i).uri?.let { uri ->
+                                chatViewModel.onAttachFileUri(uri)
+                            }
+                        }
+                    }
                 }
                 intent.action = null
             }
@@ -92,9 +105,9 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Конфигурация параметров дисплея и оконного менеджера под Samsung S23 Ultra:
-     * - Отключение системных разделителей и принудительного контраста навигации;
-     * - Корректное сквозное заполнение зоны вокруг фронтальной камеры (Cutout Short Edges);
+     * Конфигурация параметров дисплея под Samsung S23 Ultra:
+     * - Сквозное заполнение зоны вокруг фронтальной камеры (Cutout Short Edges);
+     * - Отключение системных разделителей навигации;
      * - Принудительно белые иконки статусной строки на черном фоне.
      */
     private fun configureDisplayWindow() {
@@ -103,7 +116,6 @@ class MainActivity : ComponentActivity() {
         window.isNavigationBarContrastEnforced = false
         window.isStatusBarContrastEnforced = false
 
-        // Корректное переприсвоение LayoutParams для вызова dispatchWindowAttributesChanged()
         val params = window.attributes
         params.layoutInDisplayCutoutMode =
             WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES

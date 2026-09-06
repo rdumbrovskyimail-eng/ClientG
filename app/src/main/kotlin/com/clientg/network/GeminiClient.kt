@@ -146,7 +146,7 @@ class GeminiApiException(
 ) : Exception("Gemini API Error [$httpStatusCode | $googleErrorCode]: $userFriendlyMessage")
 
 // ====================================================================
-// 2. Wire-DTO спецификации Google Generative Language REST v1beta
+// 2. Wire-DTO спецификации Google Generative Language REST v1
 // ====================================================================
 
 @Serializable
@@ -163,7 +163,7 @@ internal data class GeminiWireRequest(
 internal data class CreateCachedContentRequest(
     val model: String,
     val contents: List<ContentDto>,
-    val ttl: String = "7200s" // Гарантированная фиксация в памяти TPU на 2 часа
+    val ttl: String = "7200s"
 )
 
 @Serializable
@@ -341,7 +341,7 @@ private class TrafficStatsElement(private val tag: Int) : ThreadContextElement<I
 }
 
 // ====================================================================
-// 4. Сетевое ядро: GeminiClient
+// 4. Сетевое ядро: GeminiClient (Agent Platform Express Mode)
 // ====================================================================
 
 class GeminiClient(
@@ -351,7 +351,8 @@ class GeminiClient(
 ) : Closeable {
 
     companion object {
-        private const val BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+        // Официальный глобальный эндпоинт Gemini Enterprise Agent Platform в Express Mode (v1)
+        private const val BASE_URL = "https://aiplatform.googleapis.com/v1/publishers/google/models"
         private const val DEFAULT_MODEL_NAME = "gemini-3.8-flash"
         private const val ANDROID_NET_TAG = 0x0000FA01
 
@@ -470,8 +471,7 @@ class GeminiClient(
     }
 
     /**
-     * Аппаратная фиксация тяжелых вложений в кэше TPU Google на 2 часа (7200 сек).
-     * Защищает от повторного списания 100k-140k токенов при любых сетевых сбоях.
+     * Аппаратная фиксация тяжелых вложений в кэше Google на 2 часа (7200 сек).
      */
     suspend fun pinExplicitContextCache(
         attachments: List<TextAttachment>,
@@ -487,7 +487,7 @@ class GeminiClient(
             )
         }
 
-        val endpoint = "$BASE_URL/cachedContents?key=$apiKey"
+        val endpoint = "https://aiplatform.googleapis.com/v1/cachedContents?key=$apiKey"
         val cacheParts = attachments.map { att ->
             val safeName = escapeXmlAttribute(att.fileName)
             val safeContent = escapeXmlText(att.content)
@@ -495,14 +495,15 @@ class GeminiClient(
         }
 
         val requestPayload = CreateCachedContentRequest(
-            model = "models/$modelName",
+            model = "publishers/google/models/$modelName",
             contents = listOf(ContentDto(role = "user", parts = cacheParts)),
             ttl = "${ttlSeconds}s"
         )
 
-        AppLogger.i(AppLogger.TAG_NET, "pinExplicitContextCache: Отправка ${attachments.size} вложений в TPU кэш Google...")
+        AppLogger.i(AppLogger.TAG_NET, "pinExplicitContextCache: Отправка ${attachments.size} вложений в кэш...")
 
         val response = httpClient.post(endpoint) {
+            header("x-goog-api-key", apiKey)
             contentType(ContentType.Application.Json)
             setBody(json.encodeToString(CreateCachedContentRequest.serializer(), requestPayload))
         }
@@ -529,10 +530,12 @@ class GeminiClient(
         val apiKey = apiKeyProvider().trim()
         if (apiKey.isBlank() || cachedContentId.isBlank()) return@withContext
 
-        val endpoint = "$BASE_URL/$cachedContentId?key=$apiKey"
+        val endpoint = "https://aiplatform.googleapis.com/v1/$cachedContentId?key=$apiKey"
         runCatching {
-            httpClient.delete(endpoint)
-            AppLogger.d(AppLogger.TAG_NET, "deleteExplicitCache: Кэш $cachedContentId удален из Google.")
+            httpClient.delete(endpoint) {
+                header("x-goog-api-key", apiKey)
+            }
+            AppLogger.d(AppLogger.TAG_NET, "deleteExplicitCache: Кэш $cachedContentId удален.")
         }.onFailure {
             AppLogger.w(AppLogger.TAG_NET, "deleteExplicitCache: Не удалось удалить кэш $cachedContentId: ${it.message}")
         }
@@ -568,16 +571,15 @@ class GeminiClient(
                     systemInstruction = systemInstruction,
                     collector = { emit(it) }
                 )
-                break // Запрос успешно завершен
+                break
             } catch (e: GeminiApiException) {
-                // САМОИСЦЕЛЕНИЕ: Если Google вернул 404 (кэш просрочен по истечении 2 часов)
                 if (e.httpStatusCode == HttpStatusCode.NotFound && currentCacheId != null && !cacheRetried && onCacheExpired != null) {
                     AppLogger.w(AppLogger.TAG_NET, "streamContent: Кэш $currentCacheId просрочен (404). Авто-перевыпуск кэша...")
                     val refreshedCacheId = onCacheExpired()
                     if (refreshedCacheId != null) {
                         currentCacheId = refreshedCacheId
                         cacheRetried = true
-                        continue // Повторяем вызов с новым валидным ID кэша без списания токенов!
+                        continue
                     }
                 }
                 throw e
@@ -607,7 +609,7 @@ class GeminiClient(
 
         collector(GeminiStreamEvent.Connecting)
         val startTime = SystemClock.elapsedRealtime()
-        val endpointUrl = "$BASE_URL/models/$modelName:streamGenerateContent?key=$apiKey&alt=sse"
+        val endpointUrl = "$BASE_URL/$modelName:streamGenerateContent?key=$apiKey&alt=sse"
 
         // 1. Формирование истории. Если кэш активен, вложения НЕ дублируются по сети!
         val rawTurns = ArrayList<ContentDto>(history.size + 1)

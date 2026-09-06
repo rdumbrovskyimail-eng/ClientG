@@ -1,35 +1,26 @@
 package com.clientg.presentation
 
+import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.Choreographer
+import com.clientg.util.AppLogger
 import kotlinx.coroutines.*
 import kotlin.coroutines.resume
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 
-/**
- * Высокоточный кадровый движок интерполяции потока токенов (Typewriter Engine).
- * 
- * Преобразует дискретные сетевые куски TCP/SSE в непрерывную, визуально гладкую
- * струю текста слева направо (аналогично Google AI Studio).
- * 
- * Адаптирован под дисплеи с любой частотой обновления (60 Гц, 90 Гц, 120 Гц).
- */
 class TypewriterEngine(
     private val onFrame: (thoughtDelta: String, contentDelta: String) -> Unit,
     private val onComplete: () -> Unit = {}
 ) {
-    // Входящие сетевые буферы (целевой текст, пришедший от Gemini)
     private val targetThought = StringBuilder()
     private val targetContent = StringBuilder()
 
-    // Индексы уже выведенных на экран символов
     private var renderedThoughtLength = 0
     private var renderedContentLength = 0
 
-    // Флаги управления потоком
     @Volatile
     private var isStreamEnded = false
 
@@ -38,68 +29,53 @@ class TypewriterEngine(
 
     private var animationJob: Job? = null
 
-    /**
-     * Помещение пришедшего куска рассуждений (thought) в очередь интерполятора.
-     */
     @Synchronized
     fun enqueueThought(delta: String) {
         if (delta.isEmpty()) return
         targetThought.append(delta)
+        AppLogger.v(AppLogger.TAG_ENGINE, "enqueueThought: +${delta.length} chars (очередь мыслей: ${targetThought.length - renderedThoughtLength})")
     }
 
-    /**
-     * Помещение пришедшего куска полезного ответа (content) в очередь интерполятора.
-     */
     @Synchronized
     fun enqueueContent(delta: String) {
         if (delta.isEmpty()) return
         targetContent.append(delta)
+        AppLogger.v(AppLogger.TAG_ENGINE, "enqueueContent: +${delta.length} chars (очередь контента: ${targetContent.length - renderedContentLength})")
     }
 
-    /**
-     * Сигнал о завершении фазы рассуждений модели.
-     */
     fun markThinkingEnded() {
+        AppLogger.d(AppLogger.TAG_ENGINE, "markThinkingEnded: Фаза мыслей завершена сервером")
         isThinkingPhaseEnded = true
     }
 
-    /**
-     * Сигнал о получении финального SSE-чанка от сервера.
-     */
     fun markStreamEnded() {
+        AppLogger.d(AppLogger.TAG_ENGINE, "markStreamEnded: Сервер закрыл SSE-поток")
         isThinkingPhaseEnded = true
         isStreamEnded = true
     }
 
-    /**
-     * Запуск кадрового цикла рендеринга на главном потоке (Dispatchers.Main.immediate).
-     */
     fun start(scope: CoroutineScope) {
         if (animationJob?.isActive == true) return
+        AppLogger.d(AppLogger.TAG_ENGINE, "start: Запуск VSYNC-цикла на Dispatchers.Main.immediate")
 
         animationJob = scope.launch(Dispatchers.Main.immediate) {
             var lastFrameTimeNanos = SystemClock.elapsedRealtimeNanos()
 
             while (isActive) {
-                // 1. Ожидание аппаратного такта VSYNC текущего экрана (60 / 90 / 120 Гц)
                 val frameTimeNanos = awaitDisplayFrame()
                 val deltaNanos = (frameTimeNanos - lastFrameTimeNanos).coerceAtLeast(1_000_000L)
                 lastFrameTimeNanos = frameTimeNanos
 
-                // Коэффициент времени относительно базовых 60 Гц (16.6 мс)
                 val deltaRatio = deltaNanos / 16_666_666f
 
                 var thoughtSlice = ""
                 var contentSlice = ""
 
-                // 2. Снятие квантов текста под синхронизацией
                 synchronized(this@TypewriterEngine) {
                     val thoughtQueue = targetThought.length - renderedThoughtLength
                     val contentQueue = targetContent.length - renderedContentLength
 
-                    // Фаза вывода мыслей
                     if (thoughtQueue > 0) {
-                        // Адаптивная скорость: если очередь растет, скорость плавно разгоняется
                         val speedFactor = calculateAdaptiveSpeed(thoughtQueue, isThinkingPhaseEnded)
                         val requestedChars = max(1, ceil(speedFactor * deltaRatio).toInt())
                         val safeLen = computeSafeSliceLength(
@@ -113,7 +89,6 @@ class TypewriterEngine(
                         }
                     }
 
-                    // Фаза вывода полезного контента
                     if (contentQueue > 0) {
                         val speedFactor = calculateAdaptiveSpeed(contentQueue, isStreamEnded)
                         val requestedChars = max(1, ceil(speedFactor * deltaRatio).toInt())
@@ -128,8 +103,8 @@ class TypewriterEngine(
                         }
                     }
 
-                    // 3. Проверка на полное завершение всей очереди после окончания сети
                     if (isStreamEnded && thoughtQueue == 0 && contentQueue == 0) {
+                        AppLogger.i(AppLogger.TAG_ENGINE, "TypewriterEngine: Очереди пусты, вывод завершен ($renderedThoughtLength chars мыслей, $renderedContentLength chars ответа)")
                         if (thoughtSlice.isNotEmpty() || contentSlice.isNotEmpty()) {
                             onFrame(thoughtSlice, contentSlice)
                         }
@@ -138,7 +113,6 @@ class TypewriterEngine(
                     }
                 }
 
-                // 4. Отправка кадров в UI-поток
                 if (thoughtSlice.isNotEmpty() || contentSlice.isNotEmpty()) {
                     onFrame(thoughtSlice, contentSlice)
                 }
@@ -146,10 +120,8 @@ class TypewriterEngine(
         }
     }
 
-    /**
-     * Остановка движка и немедленный сброс остатка очереди (при нажатии пользователем кнопки "Стоп").
-     */
     fun stopAndFlush() {
+        AppLogger.w(AppLogger.TAG_ENGINE, "stopAndFlush: Принудительный сброс очередей")
         animationJob?.cancel()
         animationJob = null
 
@@ -173,27 +145,18 @@ class TypewriterEngine(
         onComplete()
     }
 
-    /**
-     * Расчет адаптивного ускорения (P-Controller):
-     * Позволяет тексту не отставать от быстро отвечающей модели на длинном коде.
-     */
     private fun calculateAdaptiveSpeed(backlog: Int, isFlushing: Boolean): Float {
         if (isFlushing) {
-            // Если сеть уже всё прислала, сбрасываем остаток за 6-10 кадров
             return max(3f, backlog / 6f)
         }
         return when {
-            backlog <= 4 -> 1.2f   // Плавное посимвольное чтение
-            backlog <= 15 -> 2.5f  // Обычный диалоговый темп
-            backlog <= 60 -> 6.0f  // Модель выдает быструю мысль
-            else -> backlog / 10f  // Модель выдала огромный кусок кода на 200 строк
+            backlog <= 4 -> 1.2f
+            backlog <= 15 -> 2.5f
+            backlog <= 60 -> 6.0f
+            else -> backlog / 10f
         }
     }
 
-    /**
-     * Гарантия безопасности кодировки Unicode (UTF-16):
-     * Запрещает разрез строки между верхним и нижним суррогатом (эмодзи и спецсимволы).
-     */
     private fun computeSafeSliceLength(
         text: CharSequence,
         currentLength: Int,
@@ -205,17 +168,14 @@ class TypewriterEngine(
         var safeEnd = targetLength
         if (Character.isHighSurrogate(text[safeEnd - 1])) {
             if (safeEnd < text.length && Character.isLowSurrogate(text[safeEnd])) {
-                safeEnd++ // Забираем пару целиком
+                safeEnd++
             } else {
-                safeEnd-- // Откатываемся до границы пары
+                safeEnd--
             }
         }
         return max(0, safeEnd - currentLength)
     }
 
-    /**
-     * Безопасное ожидание VSYNC экрана с защитой от двойного resume при отмене.
-     */
     private suspend fun awaitDisplayFrame(): Long {
         if (Looper.myLooper() != Looper.getMainLooper()) {
             delay(16)
@@ -230,7 +190,13 @@ class TypewriterEngine(
             }
             Choreographer.getInstance().postFrameCallback(callback)
             continuation.invokeOnCancellation {
-                Choreographer.getInstance().removeFrameCallback(callback)
+                if (Looper.myLooper() == Looper.getMainLooper()) {
+                    Choreographer.getInstance().removeFrameCallback(callback)
+                } else {
+                    Handler(Looper.getMainLooper()).post {
+                        Choreographer.getInstance().removeFrameCallback(callback)
+                    }
+                }
             }
         }
     }

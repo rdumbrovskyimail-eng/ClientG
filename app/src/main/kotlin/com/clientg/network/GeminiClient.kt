@@ -10,6 +10,7 @@ import io.ktor.http.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ThreadContextElement
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
@@ -18,12 +19,18 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.Closeable
 import java.io.IOException
+import java.time.Duration
+import java.time.Instant
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+import kotlin.coroutines.CoroutineContext
 import kotlin.math.ceil
 
 // ====================================================================
@@ -44,7 +51,8 @@ enum class ChatRole(val apiValue: String) {
 data class ChatMessage(
     val role: ChatRole,
     val text: String,
-    val attachments: List<TextAttachment> = emptyList()
+    val attachments: List<TextAttachment> = emptyList(),
+    val thoughtSignature: String? = null
 )
 
 data class TextAttachment(
@@ -117,7 +125,8 @@ sealed interface GeminiStreamEvent {
 
     data class Completed(
         val finishReason: FinishReason,
-        val totalDurationMs: Long
+        val totalDurationMs: Long,
+        val thoughtSignature: String? = null
     ) : GeminiStreamEvent
 }
 
@@ -133,7 +142,7 @@ class GeminiApiException(
 // ====================================================================
 
 @Serializable
-private data class GeminiWireRequest(
+internal data class GeminiWireRequest(
     @SerialName("systemInstruction") val systemInstruction: SystemInstructionDto? = null,
     val contents: List<ContentDto>,
     @SerialName("generationConfig") val generationConfig: GenerationConfigDto,
@@ -142,45 +151,47 @@ private data class GeminiWireRequest(
 )
 
 @Serializable
-private data class SystemInstructionDto(
+internal data class SystemInstructionDto(
     val parts: List<PartDto>
 )
 
 @Serializable
-private data class ContentDto(
+internal data class ContentDto(
     val role: String,
     val parts: List<PartDto>
 )
 
 @Serializable
-private data class PartDto(
-    val text: String
+internal data class PartDto(
+    val text: String? = null,
+    @SerialName("thoughtSignature") val thoughtSignature: String? = null
 )
 
 @Serializable
-private data class ToolDto(
+internal data class ToolDto(
     @SerialName("googleSearch") val googleSearch: Map<String, String> = emptyMap()
 )
 
 @Serializable
-private data class GenerationConfigDto(
-    val maxOutputTokens: Int = 65536,
+internal data class GenerationConfigDto(
+    val maxOutputTokens: Int = 8192, // Соответствие официальному лимиту Gemini Flash
     @SerialName("thinkingConfig") val thinkingConfig: ThinkingConfigDto
 )
 
 @Serializable
-private data class ThinkingConfigDto(
-    val thinkingLevel: String
+internal data class ThinkingConfigDto(
+    val thinkingLevel: String,
+    val includeThoughts: Boolean = true // Обязательно для стриминга рассуждений
 )
 
 @Serializable
-private data class SafetySettingDto(
+internal data class SafetySettingDto(
     val category: String,
     val threshold: String
 )
 
 @Serializable
-private data class GeminiResponseChunk(
+internal data class GeminiResponseChunk(
     val candidates: List<CandidateDto>? = null,
     val promptFeedback: PromptFeedbackDto? = null,
     val usageMetadata: UsageMetadataDto? = null,
@@ -188,40 +199,40 @@ private data class GeminiResponseChunk(
 )
 
 @Serializable
-private data class PromptFeedbackDto(
+internal data class PromptFeedbackDto(
     val blockReason: String? = null,
     val blockReasonMessage: String? = null,
     val safetyRatings: List<SafetyRatingDto>? = null
 )
 
 @Serializable
-private data class SafetyRatingDto(
+internal data class SafetyRatingDto(
     val category: String? = null,
     val probability: String? = null
 )
 
 @Serializable
-private data class CandidateDto(
+internal data class CandidateDto(
     val content: ContentResponseDto? = null,
     val finishReason: String? = null,
     val groundingMetadata: GroundingMetadataDto? = null
 )
 
 @Serializable
-private data class ContentResponseDto(
+internal data class ContentResponseDto(
     val parts: List<PartResponseDto>? = null,
     val role: String? = null
 )
 
 @Serializable
-private data class PartResponseDto(
+internal data class PartResponseDto(
     val text: String? = null,
     val thought: Boolean? = false,
-    @SerialName("thought_signature") val thoughtSignature: String? = null
+    @SerialName("thoughtSignature") val thoughtSignature: String? = null
 )
 
 @Serializable
-private data class GroundingMetadataDto(
+internal data class GroundingMetadataDto(
     val webSearchQueries: List<String>? = null,
     val groundingChunks: List<GroundingChunkDto>? = null,
     val groundingSupports: List<GroundingSupportDto>? = null,
@@ -229,35 +240,35 @@ private data class GroundingMetadataDto(
 )
 
 @Serializable
-private data class SearchEntryPointDto(
+internal data class SearchEntryPointDto(
     val renderedContent: String? = null
 )
 
 @Serializable
-private data class GroundingChunkDto(
+internal data class GroundingChunkDto(
     val web: WebDto? = null
 )
 
 @Serializable
-private data class WebDto(
+internal data class WebDto(
     val uri: String? = null,
     val title: String? = null
 )
 
 @Serializable
-private data class GroundingSupportDto(
+internal data class GroundingSupportDto(
     val segment: SegmentDto? = null,
     val groundingChunkIndices: List<Int>? = null
 )
 
 @Serializable
-private data class SegmentDto(
+internal data class SegmentDto(
     val startIndex: Int = 0,
     val endIndex: Int = 0
 )
 
 @Serializable
-private data class UsageMetadataDto(
+internal data class UsageMetadataDto(
     val promptTokenCount: Int = 0,
     val candidatesTokenCount: Int = 0,
     val thoughtsTokenCount: Int = 0,
@@ -266,12 +277,12 @@ private data class UsageMetadataDto(
 )
 
 @Serializable
-private data class GoogleApiErrorContainer(
+internal data class GoogleApiErrorContainer(
     val error: GoogleApiErrorDto
 )
 
 @Serializable
-private data class GoogleApiErrorDto(
+internal data class GoogleApiErrorDto(
     val code: Int = 0,
     val message: String = "",
     val status: String = "",
@@ -279,7 +290,30 @@ private data class GoogleApiErrorDto(
 )
 
 // ====================================================================
-// 3. Сетевое ядро: GeminiClient
+// 3. ThreadContextElement для безопасной телеметрии TrafficStats
+// ====================================================================
+
+private class TrafficStatsElement(private val tag: Int) : ThreadContextElement<Int> {
+    companion object Key : CoroutineContext.Key<TrafficStatsElement>
+    override val key: CoroutineContext.Key<*> = Key
+
+    override fun updateThreadContext(context: CoroutineContext): Int {
+        val oldTag = TrafficStats.getThreadStatsTag()
+        TrafficStats.setThreadStatsTag(tag)
+        return oldTag
+    }
+
+    override fun restoreThreadContext(context: CoroutineContext, oldState: Int) {
+        if (oldState != 0) {
+            TrafficStats.setThreadStatsTag(oldState)
+        } else {
+            TrafficStats.clearThreadStatsTag()
+        }
+    }
+}
+
+// ====================================================================
+// 4. Сетевое ядро: GeminiClient
 // ====================================================================
 
 class GeminiClient(
@@ -304,7 +338,7 @@ class GeminiClient(
                 maxConnectionsCount = 32
                 endpoint {
                     maxConnectionsPerRoute = 8
-                    pipelineMaxSize = 16
+                    pipelineMaxSize = 1 // Отключение pipelining для стабильности SSE
                     keepAliveTime = 30_000
                     connectTimeout = 15_000
                 }
@@ -320,10 +354,24 @@ class GeminiClient(
             }
 
             install(HttpTimeout) {
-                requestTimeoutMillis = 240_000
-                socketTimeoutMillis = 180_000
+                requestTimeoutMillis = HttpTimeout.INFINITE_TIMEOUT_MS // Без жесткого обрыва стрима
+                socketTimeoutMillis = 180_000 // Таймаут неактивности сокета
                 connectTimeoutMillis = 15_000
             }
+        }
+
+        private fun escapeXmlAttribute(value: String): String {
+            return value.replace("&", "&amp;")
+                .replace("\"", "&quot;")
+                .replace("'", "&apos;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+        }
+
+        private fun escapeXmlText(value: String): String {
+            return value.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
         }
     }
 
@@ -332,7 +380,7 @@ class GeminiClient(
         ignoreUnknownKeys = true
         isLenient = true
         encodeDefaults = true
-        explicitNulls = false // Защита от отправки пустых полей в protobuf Google API
+        explicitNulls = false
     }
 
     fun streamContent(
@@ -353,394 +401,405 @@ class GeminiClient(
             )
         }
 
-        runCatching { TrafficStats.setThreadStatsTag(ANDROID_NET_TAG) }
+        emit(GeminiStreamEvent.Connecting)
+        val startTime = System.currentTimeMillis()
+        val endpointUrl = "$BASE_URL/$modelName:streamGenerateContent?alt=sse"
 
-        try {
-            emit(GeminiStreamEvent.Connecting)
-            val startTime = System.currentTimeMillis()
-            val endpointUrl = "$BASE_URL/$modelName:streamGenerateContent?alt=sse"
-
-            // 1. Формирование истории диалога: XML-контейнеры для защиты от конфликта тройных грависов
-            val rawTurns = ArrayList<ContentDto>(history.size + 1)
-            for (msg in history) {
-                val historyParts = buildList {
-                    msg.attachments.forEach { att ->
-                        add(PartDto("<attachment name=\"${att.fileName}\">\n${att.content}\n</attachment>"))
-                    }
-                    if (msg.text.isNotBlank()) {
-                        add(PartDto(msg.text))
-                    }
+        // 1. Формирование истории диалога с экранированием и сохранением thoughtSignature
+        val rawTurns = ArrayList<ContentDto>(history.size + 1)
+        for (msg in history) {
+            val historyParts = buildList {
+                msg.attachments.forEach { att ->
+                    val safeName = escapeXmlAttribute(att.fileName)
+                    val safeContent = escapeXmlText(att.content)
+                    add(PartDto(text = "<attachment name=\"$safeName\">\n$safeContent\n</attachment>"))
                 }
-                if (historyParts.isNotEmpty()) {
-                    rawTurns.add(ContentDto(role = msg.role.apiValue, parts = historyParts))
+                if (msg.text.isNotBlank() || msg.thoughtSignature != null) {
+                    add(PartDto(text = msg.text.takeIf { it.isNotBlank() }, thoughtSignature = msg.thoughtSignature))
                 }
             }
-
-            // 2. Формирование текущего пользовательского хода
-            val currentParts = buildList {
-                attachments.forEach { att ->
-                    add(PartDto("<attachment name=\"${att.fileName}\">\n${att.content}\n</attachment>"))
-                }
-                if (prompt.isNotBlank()) {
-                    add(PartDto(prompt))
-                }
+            if (historyParts.isNotEmpty()) {
+                rawTurns.add(ContentDto(role = msg.role.apiValue, parts = historyParts))
             }
+        }
 
-            if (currentParts.isEmpty()) {
-                throw GeminiApiException(
-                    httpStatusCode = HttpStatusCode.BadRequest,
-                    googleErrorCode = "EMPTY_PROMPT",
-                    userFriendlyMessage = "Запрос не может быть пустым (введите текст или прикрепите файл)."
-                )
+        // 2. Формирование текущего пользовательского запроса
+        val currentParts = buildList {
+            attachments.forEach { att ->
+                val safeName = escapeXmlAttribute(att.fileName)
+                val safeContent = escapeXmlText(att.content)
+                add(PartDto(text = "<attachment name=\"$safeName\">\n$safeContent\n</attachment>"))
             }
-            rawTurns.add(ContentDto(role = ChatRole.USER.apiValue, parts = currentParts))
-
-            // 3. Отсечение ведущих сообщений ассистента в начале диалога (требование Google REST)
-            while (rawTurns.isNotEmpty() && rawTurns.first().role != ChatRole.USER.apiValue) {
-                rawTurns.removeAt(0)
+            if (prompt.isNotBlank()) {
+                add(PartDto(text = prompt))
             }
+        }
 
-            // 4. Склеивание подряд идущих сообщений с одинаковой ролью
-            val sanitizedContents = ArrayList<ContentDto>(rawTurns.size)
-            for (turn in rawTurns) {
-                val last = sanitizedContents.lastOrNull()
-                if (last != null && last.role == turn.role) {
-                    sanitizedContents[sanitizedContents.lastIndex] = ContentDto(
-                        role = last.role,
-                        parts = last.parts + turn.parts
-                    )
-                } else {
-                    sanitizedContents.add(turn)
-                }
-            }
-
-            // 5. Системная инструкция (null, если пустая, для сохранения кэша)
-            val systemDto = if (systemInstruction.isNotBlank()) {
-                SystemInstructionDto(listOf(PartDto(systemInstruction)))
-            } else {
-                null
-            }
-
-            val requestBody = GeminiWireRequest(
-                systemInstruction = systemDto,
-                contents = sanitizedContents,
-                generationConfig = GenerationConfigDto(
-                    maxOutputTokens = 65536,
-                    thinkingConfig = ThinkingConfigDto(thinkingLevel = thinkingLevel.apiValue)
-                ),
-                tools = if (enableSearch) listOf(ToolDto()) else null,
-                safetySettings = listOf(
-                    SafetySettingDto("HARM_CATEGORY_HARASSMENT", "BLOCK_ONLY_HIGH"),
-                    SafetySettingDto("HARM_CATEGORY_HATE_SPEECH", "BLOCK_ONLY_HIGH"),
-                    SafetySettingDto("HARM_CATEGORY_SEXUALLY_EXPLICIT", "BLOCK_ONLY_HIGH"),
-                    SafetySettingDto("HARM_CATEGORY_DANGEROUS_CONTENT", "BLOCK_ONLY_HIGH")
-                )
+        if (currentParts.isEmpty()) {
+            throw GeminiApiException(
+                httpStatusCode = HttpStatusCode.BadRequest,
+                googleErrorCode = "EMPTY_PROMPT",
+                userFriendlyMessage = "Запрос не может быть пустым (введите текст или прикрепите файл)."
             )
+        }
+        rawTurns.add(ContentDto(role = ChatRole.USER.apiValue, parts = currentParts))
 
-            val serializedJson = json.encodeToString(GeminiWireRequest.serializer(), requestBody)
+        // 3. Отсечение ведущих сообщений модели в начале диалога
+        while (rawTurns.isNotEmpty() && rawTurns.first().role != ChatRole.USER.apiValue) {
+            rawTurns.removeAt(0)
+        }
 
-            var isThinkingPhase = false
-            var hasContentStarted = false
-            var currentThinkingStartTime = 0L
-            var totalThoughtChars = 0
+        // 4. Склеивание подряд идущих ходов с одинаковой ролью
+        val sanitizedContents = ArrayList<ContentDto>(rawTurns.size)
+        for (turn in rawTurns) {
+            val last = sanitizedContents.lastOrNull()
+            if (last != null && last.role == turn.role) {
+                sanitizedContents[sanitizedContents.lastIndex] = ContentDto(
+                    role = last.role,
+                    parts = last.parts + turn.parts
+                )
+            } else {
+                sanitizedContents.add(turn)
+            }
+        }
 
-            val discoveredQueries = mutableSetOf<String>()
-            val discoveredSourceUrls = mutableSetOf<String>()
-            val discoveredCitations = mutableSetOf<InlineCitation>()
-            val accumulatedGroundingChunks = mutableListOf<GroundingChunkDto>()
-            var emittedSearchEntryPoint = false
-            var finalFinishReason = FinishReason.UNKNOWN
+        // 5. Системная инструкция
+        val systemDto = if (systemInstruction.isNotBlank()) {
+            SystemInstructionDto(listOf(PartDto(text = systemInstruction)))
+        } else {
+            null
+        }
 
-            // 6. Сетевой вызов с защитой от прокси-буферизации через Accept: text/event-stream
-            try {
-                httpClient.preparePost(endpointUrl) {
-                    header("x-goog-api-key", apiKey)
-                    header(HttpHeaders.Accept, "text/event-stream")
-                    header(HttpHeaders.CacheControl, "no-cache")
-                    contentType(ContentType.Application.Json)
-                    setBody(serializedJson)
-                }.execute { httpResponse ->
-                    if (!httpResponse.status.isSuccess()) {
-                        val errorBody = httpResponse.bodyAsText()
-                        val parsedError = runCatching {
-                            json.decodeFromString(GoogleApiErrorContainer.serializer(), errorBody).error
-                        }.getOrNull()
+        val requestBody = GeminiWireRequest(
+            systemInstruction = systemDto,
+            contents = sanitizedContents,
+            generationConfig = GenerationConfigDto(
+                maxOutputTokens = 8192,
+                thinkingConfig = ThinkingConfigDto(
+                    thinkingLevel = thinkingLevel.apiValue,
+                    includeThoughts = true
+                )
+            ),
+            tools = if (enableSearch) listOf(ToolDto()) else null,
+            safetySettings = listOf(
+                SafetySettingDto("HARM_CATEGORY_HARASSMENT", "BLOCK_ONLY_HIGH"),
+                SafetySettingDto("HARM_CATEGORY_HATE_SPEECH", "BLOCK_ONLY_HIGH"),
+                SafetySettingDto("HARM_CATEGORY_SEXUALLY_EXPLICIT", "BLOCK_ONLY_HIGH"),
+                SafetySettingDto("HARM_CATEGORY_DANGEROUS_CONTENT", "BLOCK_ONLY_HIGH")
+            )
+        )
 
-                        val headerRetrySeconds = httpResponse.headers["Retry-After"]?.toLongOrNull()
-                        val bodyRetrySeconds = extractRetryDelaySeconds(parsedError)
-                        val retrySeconds = headerRetrySeconds ?: bodyRetrySeconds
+        val serializedJson = json.encodeToString(GeminiWireRequest.serializer(), requestBody)
 
-                        val rawFallback = errorBody.take(300).trim()
-                        val message = when (httpResponse.status) {
-                            HttpStatusCode.TooManyRequests -> {
-                                if (retrySeconds != null) {
-                                    "Превышен лимит запросов к Gemini API. Повторите через $retrySeconds сек."
-                                } else {
-                                    "Превышен лимит запросов (429 Quota Exceeded). Подождите несколько секунд."
-                                }
+        var isThinkingPhase = false
+        var hasContentStarted = false
+        var currentThinkingStartTime = 0L
+        var totalThoughtChars = 0
+
+        val discoveredQueries = mutableSetOf<String>()
+        val discoveredSourceUrls = mutableSetOf<String>()
+        val discoveredCitations = mutableSetOf<InlineCitation>()
+        val accumulatedGroundingChunks = mutableListOf<GroundingChunkDto>()
+        var emittedSearchEntryPoint = false
+        var finalFinishReason = FinishReason.UNKNOWN
+        var latestThoughtSignature: String? = null
+
+        // 6. Сетевой вызов
+        try {
+            httpClient.preparePost(endpointUrl) {
+                header("x-goog-api-key", apiKey)
+                header(HttpHeaders.Accept, "text/event-stream")
+                header(HttpHeaders.CacheControl, "no-cache")
+                contentType(ContentType.Application.Json)
+                setBody(serializedJson)
+            }.execute { httpResponse ->
+                if (!httpResponse.status.isSuccess()) {
+                    val errorBody = httpResponse.bodyAsText()
+                    val parsedError = runCatching {
+                        json.decodeFromString(GoogleApiErrorContainer.serializer(), errorBody).error
+                    }.getOrNull()
+
+                    val headerRetrySeconds = parseRetryAfter(httpResponse.headers[HttpHeaders.RetryAfter])
+                    val bodyRetrySeconds = extractRetryDelaySeconds(parsedError)
+                    val retrySeconds = headerRetrySeconds ?: bodyRetrySeconds
+
+                    val rawFallback = errorBody.take(300).trim()
+                    val message = when (httpResponse.status) {
+                        HttpStatusCode.TooManyRequests -> {
+                            if (retrySeconds != null) {
+                                "Превышен лимит запросов к Gemini API. Повторите через $retrySeconds сек."
+                            } else {
+                                "Превышен лимит запросов (429 Quota Exceeded). Подождите несколько секунд."
                             }
-                            HttpStatusCode.Unauthorized, HttpStatusCode.Forbidden ->
-                                "Неверный API-ключ Gemini или доступ запрещен."
-                            HttpStatusCode.BadRequest ->
-                                parsedError?.message?.takeIf { it.isNotBlank() }
-                                    ?: rawFallback.ifBlank { "Некорректные параметры запроса." }
-                            else ->
-                                parsedError?.message?.takeIf { it.isNotBlank() }
-                                    ?: rawFallback.ifBlank { "Ошибка сервера Google (${httpResponse.status.value})." }
                         }
+                        HttpStatusCode.Unauthorized, HttpStatusCode.Forbidden ->
+                            "Неверный API-ключ Gemini или доступ запрещен."
+                        HttpStatusCode.BadRequest ->
+                            parsedError?.message?.takeIf { it.isNotBlank() }
+                                ?: rawFallback.ifBlank { "Некорректные параметры запроса." }
+                        else ->
+                            parsedError?.message?.takeIf { it.isNotBlank() }
+                                ?: rawFallback.ifBlank { "Ошибка сервера Google (${httpResponse.status.value})." }
+                    }
+
+                    throw GeminiApiException(
+                        httpStatusCode = httpResponse.status,
+                        googleErrorCode = parsedError?.status ?: "HTTP_${httpResponse.status.value}",
+                        userFriendlyMessage = message,
+                        retryAfterSeconds = retrySeconds
+                    )
+                }
+
+                val channel: ByteReadChannel = httpResponse.bodyAsChannel()
+                val sseEventDataBuffer = StringBuilder()
+
+                // 7. Обработка неделимого W3C JSON-пакета
+                suspend fun processCompleteSsePayload(dataPayload: String) {
+                    if (dataPayload.isEmpty() || dataPayload == "[DONE]") return
+
+                    // Изолированная десериализация (сохраняет Exception Transparency для emit)
+                    val chunk = try {
+                        json.decodeFromString(GeminiResponseChunk.serializer(), dataPayload)
+                    } catch (_: SerializationException) {
+                        return
+                    } catch (_: IllegalArgumentException) {
+                        return
+                    }
+
+                    chunk.error?.let { sseError ->
+                        val retrySec = extractRetryDelaySeconds(sseError)
+                        val statusCode = runCatching {
+                            HttpStatusCode.fromValue(if (sseError.code in 100..599) sseError.code else 500)
+                        }.getOrDefault(HttpStatusCode.InternalServerError)
 
                         throw GeminiApiException(
-                            httpStatusCode = httpResponse.status,
-                            googleErrorCode = parsedError?.status ?: "HTTP_${httpResponse.status.value}",
-                            userFriendlyMessage = message,
-                            retryAfterSeconds = retrySeconds
+                            httpStatusCode = statusCode,
+                            googleErrorCode = sseError.status,
+                            userFriendlyMessage = sseError.message,
+                            retryAfterSeconds = retrySec
                         )
                     }
 
-                    val channel: ByteReadChannel = httpResponse.bodyAsChannel()
-                    val sseEventDataBuffer = StringBuilder()
+                    chunk.promptFeedback?.let { feedback ->
+                        if (!feedback.blockReason.isNullOrBlank()) {
+                            throw GeminiApiException(
+                                httpStatusCode = HttpStatusCode.BadRequest,
+                                googleErrorCode = "PROMPT_BLOCKED_${feedback.blockReason}",
+                                userFriendlyMessage = feedback.blockReasonMessage
+                                    ?: "Запрос отклонен политикой безопасности (${feedback.blockReason})."
+                            )
+                        }
+                    }
 
-                    // Обработка неделимого W3C JSON-пакета
-                    suspend fun processCompleteSsePayload(dataPayload: String) {
-                        if (dataPayload.isEmpty() || dataPayload == "[DONE]") return
+                    val candidate = chunk.candidates?.firstOrNull()
 
-                        try {
-                            val chunk = json.decodeFromString(GeminiResponseChunk.serializer(), dataPayload)
+                    candidate?.finishReason?.let { reason ->
+                        finalFinishReason = when (reason) {
+                            "STOP" -> FinishReason.STOP
+                            "MAX_TOKENS" -> FinishReason.MAX_TOKENS
+                            "SAFETY" -> FinishReason.SAFETY
+                            "RECITATION" -> FinishReason.RECITATION
+                            "LANGUAGE" -> FinishReason.LANGUAGE
+                            "BLOCKLIST" -> FinishReason.BLOCKLIST
+                            "PROHIBITED_CONTENT" -> FinishReason.PROHIBITED_CONTENT
+                            else -> FinishReason.UNKNOWN
+                        }
+                    }
 
-                            chunk.error?.let { sseError ->
-                                val retrySec = extractRetryDelaySeconds(sseError)
-                                val statusCode = runCatching {
-                                    HttpStatusCode.fromValue(if (sseError.code in 100..599) sseError.code else 500)
-                                }.getOrDefault(HttpStatusCode.InternalServerError)
+                    // Обработка Google Search Grounding с безопасным маппингом индексов
+                    candidate?.groundingMetadata?.let { meta ->
+                        meta.webSearchQueries?.let { queries ->
+                            val newQueries = queries.filter { discoveredQueries.add(it) }
+                            if (newQueries.isNotEmpty()) {
+                                emit(GeminiStreamEvent.SearchQueriesDiscovered(newQueries))
+                            }
+                        }
 
-                                throw GeminiApiException(
-                                    httpStatusCode = statusCode,
-                                    googleErrorCode = sseError.status,
-                                    userFriendlyMessage = sseError.message,
-                                    retryAfterSeconds = retrySec
-                                )
+                        val currentChunkList = meta.groundingChunks ?: emptyList()
+                        if (currentChunkList.isNotEmpty()) {
+                            if (currentChunkList.size >= accumulatedGroundingChunks.size) {
+                                accumulatedGroundingChunks.clear()
+                                accumulatedGroundingChunks.addAll(currentChunkList)
                             }
 
-                            chunk.promptFeedback?.let { feedback ->
-                                if (!feedback.blockReason.isNullOrBlank()) {
-                                    throw GeminiApiException(
-                                        httpStatusCode = HttpStatusCode.BadRequest,
-                                        googleErrorCode = "PROMPT_BLOCKED_${feedback.blockReason}",
-                                        userFriendlyMessage = feedback.blockReasonMessage
-                                            ?: "Запрос отклонен политикой безопасности (${feedback.blockReason})."
+                            val newSourcesBatch = mutableListOf<GroundingSource>()
+                            currentChunkList.forEach { chunkItem ->
+                                val web = chunkItem.web ?: return@forEach
+                                val uri = web.uri ?: return@forEach
+                                if (discoveredSourceUrls.add(uri)) {
+                                    newSourcesBatch.add(
+                                        GroundingSource(
+                                            title = web.title?.takeIf { it.isNotBlank() } ?: uri,
+                                            url = uri
+                                        )
                                     )
                                 }
                             }
-
-                            val candidate = chunk.candidates?.firstOrNull()
-
-                            candidate?.finishReason?.let { reason ->
-                                finalFinishReason = when (reason) {
-                                    "STOP" -> FinishReason.STOP
-                                    "MAX_TOKENS" -> FinishReason.MAX_TOKENS
-                                    "SAFETY" -> FinishReason.SAFETY
-                                    "RECITATION" -> FinishReason.RECITATION
-                                    "LANGUAGE" -> FinishReason.LANGUAGE
-                                    "BLOCKLIST" -> FinishReason.BLOCKLIST
-                                    "PROHIBITED_CONTENT" -> FinishReason.PROHIBITED_CONTENT
-                                    else -> FinishReason.UNKNOWN
-                                }
+                            if (newSourcesBatch.isNotEmpty()) {
+                                emit(GeminiStreamEvent.SourcesDiscovered(newSourcesBatch))
                             }
+                        }
 
-                            // Обработка поиска Google Search Grounding
-                            candidate?.groundingMetadata?.let { meta ->
-                                meta.webSearchQueries?.let { queries ->
-                                    val newQueries = queries.filter { discoveredQueries.add(it) }
-                                    if (newQueries.isNotEmpty()) {
-                                        emit(GeminiStreamEvent.SearchQueriesDiscovered(newQueries))
-                                    }
-                                }
+                        meta.groundingSupports?.let { supports ->
+                            val chunkPool = if (currentChunkList.isNotEmpty()) currentChunkList else accumulatedGroundingChunks
+                            if (chunkPool.isNotEmpty()) {
+                                val citations = supports.flatMap { sup ->
+                                    val seg = sup.segment ?: return@flatMap emptyList<InlineCitation>()
+                                    val indices = sup.groundingChunkIndices ?: return@flatMap emptyList<InlineCitation>()
 
-                                meta.groundingChunks?.let { chunks ->
-                                    if (chunks.size >= accumulatedGroundingChunks.size &&
-                                        accumulatedGroundingChunks.indices.all { i ->
-                                            accumulatedGroundingChunks[i].web?.uri == chunks[i].web?.uri
-                                        }
-                                    ) {
-                                        accumulatedGroundingChunks.clear()
-                                        accumulatedGroundingChunks.addAll(chunks)
-                                    } else {
-                                        accumulatedGroundingChunks.addAll(chunks)
-                                    }
+                                    indices.mapNotNull { srcIndex ->
+                                        val chunkItem = chunkPool.getOrNull(srcIndex) ?: return@mapNotNull null
+                                        val web = chunkItem.web ?: return@mapNotNull null
+                                        val uri = web.uri ?: return@mapNotNull null
 
-                                    val newSourcesBatch = mutableListOf<GroundingSource>()
-                                    chunks.forEach { chunkItem ->
-                                        val web = chunkItem.web ?: return@forEach
-                                        val uri = web.uri ?: return@forEach
-                                        if (discoveredSourceUrls.add(uri)) {
-                                            newSourcesBatch.add(
-                                                GroundingSource(
-                                                    title = web.title?.takeIf { it.isNotBlank() } ?: uri,
-                                                    url = uri
-                                                )
+                                        InlineCitation(
+                                            startIndex = seg.startIndex,
+                                            endIndex = seg.endIndex,
+                                            source = GroundingSource(
+                                                title = web.title?.takeIf { it.isNotBlank() } ?: uri,
+                                                url = uri
                                             )
-                                        }
-                                    }
-                                    if (newSourcesBatch.isNotEmpty()) {
-                                        emit(GeminiStreamEvent.SourcesDiscovered(newSourcesBatch))
+                                        )
                                     }
                                 }
-
-                                // Точечные сноски: обработка всех индексов без потерь
-                                meta.groundingSupports?.let { supports ->
-                                    if (accumulatedGroundingChunks.isNotEmpty()) {
-                                        val citations = supports.flatMap { sup ->
-                                            val seg = sup.segment ?: return@flatMap emptyList<InlineCitation>()
-                                            val indices = sup.groundingChunkIndices ?: return@flatMap emptyList<InlineCitation>()
-
-                                            indices.mapNotNull { srcIndex ->
-                                                val chunkItem = accumulatedGroundingChunks.getOrNull(srcIndex) ?: return@mapNotNull null
-                                                val web = chunkItem.web ?: return@mapNotNull null
-                                                val uri = web.uri ?: return@mapNotNull null
-
-                                                InlineCitation(
-                                                    startIndex = seg.startIndex,
-                                                    endIndex = seg.endIndex,
-                                                    source = GroundingSource(
-                                                        title = web.title?.takeIf { it.isNotBlank() } ?: uri,
-                                                        url = uri
-                                                    )
-                                                )
-                                            }
-                                        }
-                                        val uniqueCitations = citations.filter { discoveredCitations.add(it) }
-                                        if (uniqueCitations.isNotEmpty()) {
-                                            emit(GeminiStreamEvent.CitationsDiscovered(uniqueCitations))
-                                        }
-                                    }
-                                }
-
-                                if (!emittedSearchEntryPoint) {
-                                    meta.searchEntryPoint?.renderedContent?.let { htmlSnippet ->
-                                        if (htmlSnippet.isNotBlank()) {
-                                            emit(GeminiStreamEvent.SearchEntryPointRendered(htmlSnippet))
-                                            emittedSearchEntryPoint = true
-                                        }
-                                    }
+                                val uniqueCitations = citations.filter { discoveredCitations.add(it) }
+                                if (uniqueCitations.isNotEmpty()) {
+                                    emit(GeminiStreamEvent.CitationsDiscovered(uniqueCitations))
                                 }
                             }
+                        }
 
-                            // Разделение мыслей и полезного текста
-                            candidate?.content?.parts?.forEach { part ->
-                                val text = part.text ?: return@forEach
-                                if (text.isEmpty()) return@forEach
-
-                                if (part.thought == true) {
-                                    if (!isThinkingPhase) {
-                                        isThinkingPhase = true
-                                        currentThinkingStartTime = System.currentTimeMillis()
-                                        emit(GeminiStreamEvent.ThinkingStarted)
-                                    }
-                                    totalThoughtChars += text.length
-                                    emit(GeminiStreamEvent.ThinkingDelta(text))
-                                } else {
-                                    if (isThinkingPhase) {
-                                        isThinkingPhase = false
-                                        val duration = (System.currentTimeMillis() - currentThinkingStartTime).coerceAtLeast(0L)
-                                        emit(GeminiStreamEvent.ThinkingCompleted(duration, totalThoughtChars))
-                                    }
-                                    if (!hasContentStarted) {
-                                        hasContentStarted = true
-                                        emit(GeminiStreamEvent.ContentStarted)
-                                    }
-                                    emit(GeminiStreamEvent.ContentDelta(text))
+                        if (!emittedSearchEntryPoint) {
+                            meta.searchEntryPoint?.renderedContent?.let { htmlSnippet ->
+                                if (htmlSnippet.isNotBlank()) {
+                                    emit(GeminiStreamEvent.SearchEntryPointRendered(htmlSnippet))
+                                    emittedSearchEntryPoint = true
                                 }
                             }
-
-                            // Учет токенов и эффективности кэша
-                            chunk.usageMetadata?.let { usage ->
-                                val cached = usage.cachedContentTokenCount
-                                val promptTotal = usage.promptTokenCount
-                                val hitRate = if (promptTotal > 0) (cached.toFloat() / promptTotal.toFloat()) * 100f else 0f
-
-                                emit(
-                                    GeminiStreamEvent.UsageReported(
-                                        promptTokens = promptTotal,
-                                        candidateTokens = usage.candidatesTokenCount,
-                                        thoughtsTokens = usage.thoughtsTokenCount,
-                                        cachedTokens = cached,
-                                        totalTokens = usage.totalTokenCount,
-                                        cacheHitPercentage = hitRate
-                                    )
-                                )
-                            }
-
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: GeminiApiException) {
-                            throw e
-                        } catch (_: Exception) {
-                            // Игнорируем промежуточный шум
                         }
                     }
 
-                    // 7. Полноценный W3C EventBuffer разбор потока
-                    while (!channel.isClosedForRead) {
-                        currentCoroutineContext().ensureActive()
-
-                        val rawLine = channel.readUTF8Line() ?: break
-                        val line = rawLine.trim()
-
-                        if (line.isEmpty()) {
-                            // Граница события SSE (\n\n)
-                            if (sseEventDataBuffer.isNotEmpty()) {
-                                val completePayload = sseEventDataBuffer.toString()
-                                sseEventDataBuffer.setLength(0)
-                                processCompleteSsePayload(completePayload)
+                    // Разделение мыслей, текста и захват thoughtSignature
+                    candidate?.content?.parts?.forEach { part ->
+                        part.thoughtSignature?.let { signature ->
+                            if (signature.isNotBlank()) {
+                                latestThoughtSignature = signature
                             }
-                            continue
                         }
 
-                        if (line.startsWith("data:")) {
-                            val dataPart = line.removePrefix("data:").trimStart()
-                            if (sseEventDataBuffer.isNotEmpty()) {
-                                sseEventDataBuffer.append("\n")
+                        val text = part.text ?: return@forEach
+                        if (text.isEmpty()) return@forEach
+
+                        if (part.thought == true) {
+                            if (!isThinkingPhase) {
+                                isThinkingPhase = true
+                                currentThinkingStartTime = System.currentTimeMillis()
+                                emit(GeminiStreamEvent.ThinkingStarted)
                             }
-                            sseEventDataBuffer.append(dataPart)
+                            totalThoughtChars += text.length
+                            emit(GeminiStreamEvent.ThinkingDelta(text))
+                        } else {
+                            if (isThinkingPhase) {
+                                isThinkingPhase = false
+                                val duration = (System.currentTimeMillis() - currentThinkingStartTime).coerceAtLeast(0L)
+                                emit(GeminiStreamEvent.ThinkingCompleted(duration, totalThoughtChars))
+                            }
+                            if (!hasContentStarted) {
+                                hasContentStarted = true
+                                emit(GeminiStreamEvent.ContentStarted)
+                            }
+                            emit(GeminiStreamEvent.ContentDelta(text))
                         }
                     }
 
-                    // Финализация остатка буфера
-                    if (sseEventDataBuffer.isNotEmpty()) {
-                        val remainingPayload = sseEventDataBuffer.toString()
-                        sseEventDataBuffer.setLength(0)
-                        processCompleteSsePayload(remainingPayload)
-                    }
+                    // Метаданные токенов
+                    chunk.usageMetadata?.let { usage ->
+                        val cached = usage.cachedContentTokenCount
+                        val promptTotal = usage.promptTokenCount
+                        val hitRate = if (promptTotal > 0) (cached.toFloat() / promptTotal.toFloat()) * 100f else 0f
 
-                    if (isThinkingPhase) {
-                        val duration = (System.currentTimeMillis() - currentThinkingStartTime).coerceAtLeast(0L)
-                        emit(GeminiStreamEvent.ThinkingCompleted(duration, totalThoughtChars))
+                        emit(
+                            GeminiStreamEvent.UsageReported(
+                                promptTokens = promptTotal,
+                                candidateTokens = usage.candidatesTokenCount,
+                                thoughtsTokens = usage.thoughtsTokenCount,
+                                cachedTokens = cached,
+                                totalTokens = usage.totalTokenCount,
+                                cacheHitPercentage = hitRate
+                            )
+                        )
                     }
-
-                    val totalDuration = (System.currentTimeMillis() - startTime).coerceAtLeast(0L)
-                    emit(GeminiStreamEvent.Completed(finalFinishReason, totalDuration))
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: GeminiApiException) {
-                throw e
-            } catch (e: HttpRequestTimeoutException) {
-                throw GeminiApiException(
-                    httpStatusCode = HttpStatusCode.RequestTimeout,
-                    googleErrorCode = "REQUEST_TIMEOUT",
-                    userFriendlyMessage = "Время ожидания ответа от Gemini истекло. Повторите запрос."
-                )
-            } catch (e: IOException) {
-                throw GeminiApiException(
-                    httpStatusCode = HttpStatusCode.GatewayTimeout,
-                    googleErrorCode = "NETWORK_UNAVAILABLE",
-                    userFriendlyMessage = "Сетевая ошибка: проверьте интернет-соединение на устройстве."
-                )
+
+                // 8. Разбор потока W3C SSE
+                while (!channel.isClosedForRead) {
+                    currentCoroutineContext().ensureActive()
+
+                    val rawLine = channel.readUTF8Line() ?: break
+                    val line = rawLine.trim()
+
+                    if (line.isEmpty()) {
+                        if (sseEventDataBuffer.isNotEmpty()) {
+                            val completePayload = sseEventDataBuffer.toString()
+                            sseEventDataBuffer.setLength(0)
+                            processCompleteSsePayload(completePayload)
+                        }
+                        continue
+                    }
+
+                    if (line.startsWith("data:")) {
+                        val dataPart = line.removePrefix("data:").trimStart()
+                        if (sseEventDataBuffer.isNotEmpty()) {
+                            sseEventDataBuffer.append("\n")
+                        }
+                        sseEventDataBuffer.append(dataPart)
+                    }
+                }
+
+                if (sseEventDataBuffer.isNotEmpty()) {
+                    val remainingPayload = sseEventDataBuffer.toString()
+                    sseEventDataBuffer.setLength(0)
+                    processCompleteSsePayload(remainingPayload)
+                }
+
+                if (isThinkingPhase) {
+                    val duration = (System.currentTimeMillis() - currentThinkingStartTime).coerceAtLeast(0L)
+                    emit(GeminiStreamEvent.ThinkingCompleted(duration, totalThoughtChars))
+                }
+
+                val totalDuration = (System.currentTimeMillis() - startTime).coerceAtLeast(0L)
+                emit(GeminiStreamEvent.Completed(finalFinishReason, totalDuration, latestThoughtSignature))
             }
-        } finally {
-            runCatching { TrafficStats.clearThreadStatsTag() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: GeminiApiException) {
+            throw e
+        } catch (e: HttpRequestTimeoutException) {
+            throw GeminiApiException(
+                httpStatusCode = HttpStatusCode.RequestTimeout,
+                googleErrorCode = "REQUEST_TIMEOUT",
+                userFriendlyMessage = "Время ожидания ответа от Gemini истекло. Повторите запрос."
+            )
+        } catch (e: IOException) {
+            throw GeminiApiException(
+                httpStatusCode = HttpStatusCode.GatewayTimeout,
+                googleErrorCode = "NETWORK_UNAVAILABLE",
+                userFriendlyMessage = "Сетевая ошибка: проверьте интернет-соединение на устройстве."
+            )
         }
-    }.flowOn(Dispatchers.IO)
+    }.flowOn(Dispatchers.IO + TrafficStatsElement(ANDROID_NET_TAG))
+
+    private fun parseRetryAfter(headerValue: String?): Long? {
+        if (headerValue.isNullOrBlank()) return null
+        headerValue.toLongOrNull()?.let { return it }
+
+        return runCatching {
+            val formatter = DateTimeFormatter.RFC_1123_DATE_TIME
+            val instant = formatter.parse(headerValue, Instant::from)
+            val seconds = Duration.between(Instant.now(), instant).seconds
+            seconds.coerceAtLeast(0L)
+        }.getOrNull()
+    }
 
     private fun extractRetryDelaySeconds(errorDto: GoogleApiErrorDto?): Long? {
         if (errorDto?.details == null) return null

@@ -17,9 +17,9 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // Аппаратная оптимизация: чистый 64-битный код под Snapdragon 8 Gen 2 for Galaxy
+        // Чистая 64-битная среда: оптимизация под Snapdragon 8 Gen 2 и эмуляторы x86_64
         ndk {
-            abiFilters += listOf("arm64-v8a")
+            abiFilters += listOf("arm64-v8a", "x86_64")
         }
     }
 
@@ -78,28 +78,28 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
 
-    // --- Jetpack Compose UI (BOM 2026.08.00) ---
+    // --- Jetpack Compose UI ---
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons)
 
-    // --- Асинхронность и потоки (Coroutines 1.11.0) ---
+    // --- Асинхронность и потоки (Coroutines) ---
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
 
-    // --- Высокоскоростной сетевой клиент Ktor (3.5.2 CIO) ---
+    // --- Высокоскоростной сетевой клиент Ktor (CIO движок) ---
     implementation(libs.ktor.client.core)
     implementation(libs.ktor.client.cio)
 
-    // --- Сериализация JSON (Kotlinx Serialization 1.12.0-RC) ---
+    // --- Сериализация JSON ---
     implementation(libs.kotlinx.serialization.json)
 
-    // --- Аппаратная безопасность Samsung Knox Vault (Crypto 1.1.0) ---
+    // --- Аппаратная безопасность Samsung Knox Vault ---
     implementation(libs.androidx.security.crypto)
 }
 
-// Отключаем проверку метаданных AAR
-tasks.matching { it.name.contains("AarMetadata") }.configureEach {
+// Ленивая конфигурация задач AAR без нарушения Gradle Configuration Cache
+tasks.withType<com.android.build.gradle.tasks.CheckAarMetadataTask>().configureEach {
     enabled = false
 }

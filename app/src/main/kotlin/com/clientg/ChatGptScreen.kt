@@ -402,9 +402,11 @@ fun ChatGptScreen(
                 text = uiState.inputText,
                 isGenerating = uiState.isGenerating,
                 enableSearch = uiState.enableSearch,
+                thinkingLevel = uiState.thinkingLevel,
                 hasAttachments = uiState.attachedFiles.isNotEmpty(),
                 onTextChanged = { viewModel.onInputTextChanged(it) },
                 onToggleSearch = { viewModel.onToggleSearch(!uiState.enableSearch) },
+                onThinkingLevelSelected = { viewModel.onThinkingLevelChanged(it) },
                 onSendMessage = { viewModel.onSendMessage() },
                 onCancelGeneration = { viewModel.onCancelGeneration() },
                 onAttachClick = {
@@ -542,7 +544,7 @@ private fun EmptyStateHero(
 }
 
 // ====================================================================
-// Верхняя панель (Top Bar)
+// Верхняя панель (Top Bar) с селектором уровня рассуждений
 // ====================================================================
 
 @Composable
@@ -574,42 +576,92 @@ private fun ChatTopBar(
                 Spacer(modifier = Modifier.width(6.dp))
 
                 Box {
+                    // Интерактивный бейдж выбора режима с индикатором и стрелкой
                     Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = Color(0xFF192230),
-                        modifier = Modifier.clickable { menuExpanded = true }
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFF16202E),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF24364D)),
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .clickable { menuExpanded = true }
                     ) {
-                        Text(
-                            text = "3.8 FLASH • ${currentLevel.name}",
-                            color = SearchActiveText,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold,
-                            style = DefaultTextStyle,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "3.8 FLASH • ${currentLevel.name}",
+                                color = SearchActiveText,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                style = DefaultTextStyle
+                            )
+                            Spacer(modifier = Modifier.width(2.dp))
+                            Icon(
+                                imageVector = Icons.Default.KeyboardArrowDown,
+                                contentDescription = "Выбрать уровень рассуждений",
+                                tint = SearchActiveText,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
                     }
 
                     DropdownMenu(
                         expanded = menuExpanded,
                         onDismissRequest = { menuExpanded = false },
-                        modifier = Modifier.background(AmoledSurface)
+                        modifier = Modifier
+                            .background(AmoledSurface)
+                            .border(1.dp, Color(0xFF2D2D2D), RoundedCornerShape(12.dp))
                     ) {
                         DropdownMenuItem(
-                            text = { Text("HIGH (Максимальное рассуждение)", color = TextPrimary, fontSize = 13.sp) },
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = if (currentLevel == ThinkingLevel.HIGH) "● " else "○ ",
+                                        color = if (currentLevel == ThinkingLevel.HIGH) SearchActiveText else TextMuted
+                                    )
+                                    Column {
+                                        Text("HIGH", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                        Text("Глубокий анализ (максимум рассуждений)", color = TextSecondary, fontSize = 11.sp)
+                                    }
+                                }
+                            },
                             onClick = {
                                 onThinkingLevelSelected(ThinkingLevel.HIGH)
                                 menuExpanded = false
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("MEDIUM (Сбалансированное)", color = TextPrimary, fontSize = 13.sp) },
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = if (currentLevel == ThinkingLevel.MEDIUM) "● " else "○ ",
+                                        color = if (currentLevel == ThinkingLevel.MEDIUM) SearchActiveText else TextMuted
+                                    )
+                                    Column {
+                                        Text("MEDIUM (Рекомендуется)", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                        Text("Сбалансированное рассуждение", color = TextSecondary, fontSize = 11.sp)
+                                    }
+                                }
+                            },
                             onClick = {
                                 onThinkingLevelSelected(ThinkingLevel.MEDIUM)
                                 menuExpanded = false
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("LOW (Минимальная задержка)", color = TextPrimary, fontSize = 13.sp) },
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = if (currentLevel == ThinkingLevel.LOW) "● " else "○ ",
+                                        color = if (currentLevel == ThinkingLevel.LOW) SearchActiveText else TextMuted
+                                    )
+                                    Column {
+                                        Text("LOW", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                        Text("Быстрый ответ (минимум задержки)", color = TextSecondary, fontSize = 11.sp)
+                                    }
+                                }
+                            },
                             onClick = {
                                 onThinkingLevelSelected(ThinkingLevel.LOW)
                                 menuExpanded = false
@@ -1192,7 +1244,6 @@ private fun NativeMarkdownContent(
             }
         }
 
-        // Интерактивные бейджи цитирования источников
         if (citations.isNotEmpty()) {
             Row(
                 modifier = Modifier
@@ -1369,7 +1420,6 @@ private fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
     return blocks
 }
 
-// НЮАНС 4: Допуск до 3 ведущих пробелов перед забором кода по CommonMark 0.31.2
 private fun findFenceIndex(input: String, fromIndex: Int): Int {
     var idx = fromIndex
     while (idx < input.length) {
@@ -1502,7 +1552,6 @@ private fun parseInlineMarkdown(text: String, onOpenUrl: (String) -> Unit): Anno
                 }
             }
 
-            // НЮАНС 2: Роутинг кликов в onOpenUrl через linkInteractionListener
             if (text.startsWith("[", i)) {
                 val closeBracket = text.indexOf(']', i + 1)
                 val openParen = if (closeBracket != -1) text.indexOf('(', closeBracket) else -1
@@ -1622,7 +1671,7 @@ private fun FloatingScrollBottomButton(
 }
 
 // ====================================================================
-// Капсула ввода с поддержкой Enter на DeX и правильной доступностью
+// Капсула ввода с кнопками Поиска и переключения Уровня Рассуждений
 // ====================================================================
 
 @Composable
@@ -1630,9 +1679,11 @@ fun ChatGptInputBar(
     text: String,
     isGenerating: Boolean,
     enableSearch: Boolean,
+    thinkingLevel: ThinkingLevel,
     hasAttachments: Boolean,
     onTextChanged: (String) -> Unit,
     onToggleSearch: () -> Unit,
+    onThinkingLevelSelected: (ThinkingLevel) -> Unit,
     onSendMessage: () -> Unit,
     onCancelGeneration: () -> Unit,
     onAttachClick: () -> Unit
@@ -1643,6 +1694,7 @@ fun ChatGptInputBar(
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val inputScrollState = rememberScrollState()
+    var thinkingMenuExpanded by remember { mutableStateOf(false) }
 
     val sendButtonBg by animateColorAsState(
         targetValue = if (isGenerating) Color.White else if (isSendEnabled) Color.White else Color(0xFF333333),
@@ -1660,6 +1712,7 @@ fun ChatGptInputBar(
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.Bottom
     ) {
+        // Кнопка вложений (+)
         Box(
             modifier = Modifier
                 .minimumInteractiveComponentSize()
@@ -1677,8 +1730,9 @@ fun ChatGptInputBar(
             )
         }
 
-        Spacer(modifier = Modifier.width(6.dp))
+        Spacer(modifier = Modifier.width(4.dp))
 
+        // Кнопка веб-поиска (Глобус 🌐)
         Box(
             modifier = Modifier
                 .minimumInteractiveComponentSize()
@@ -1705,8 +1759,114 @@ fun ChatGptInputBar(
             )
         }
 
-        Spacer(modifier = Modifier.width(8.dp))
+        Spacer(modifier = Modifier.width(4.dp))
 
+        // Быстрый переключатель уровня рассуждений (LOW / MED / HIGH) прямо в строке ввода
+        Box {
+            Box(
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(if (thinkingLevel != ThinkingLevel.LOW) Color(0xFF1E1C2B) else AmoledButtonBg)
+                    .border(
+                        width = 1.dp,
+                        color = if (thinkingLevel != ThinkingLevel.LOW) Color(0xFF5D4BB3) else Color.Transparent,
+                        shape = CircleShape
+                    )
+                    .clickable { thinkingMenuExpanded = true },
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = "🧠",
+                        fontSize = 11.sp
+                    )
+                    Text(
+                        text = when (thinkingLevel) {
+                            ThinkingLevel.HIGH -> "HIGH"
+                            ThinkingLevel.MEDIUM -> "MED"
+                            ThinkingLevel.LOW -> "LOW"
+                        },
+                        color = if (thinkingLevel != ThinkingLevel.LOW) Color(0xFFD3C8FF) else TextSecondary,
+                        fontSize = 7.sp,
+                        fontWeight = FontWeight.Bold,
+                        lineHeight = 8.sp,
+                        style = DefaultTextStyle
+                    )
+                }
+            }
+
+            DropdownMenu(
+                expanded = thinkingMenuExpanded,
+                onDismissRequest = { thinkingMenuExpanded = false },
+                modifier = Modifier
+                    .background(AmoledSurface)
+                    .border(1.dp, Color(0xFF2D2D2D), RoundedCornerShape(12.dp))
+            ) {
+                DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = if (thinkingLevel == ThinkingLevel.HIGH) "● " else "○ ",
+                                color = if (thinkingLevel == ThinkingLevel.HIGH) Color(0xFFD3C8FF) else TextMuted
+                            )
+                            Column {
+                                Text("HIGH", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                Text("Глубокий анализ (максимум мыслей)", color = TextSecondary, fontSize = 11.sp)
+                            }
+                        }
+                    },
+                    onClick = {
+                        onThinkingLevelSelected(ThinkingLevel.HIGH)
+                        thinkingMenuExpanded = false
+                    }
+                )
+                DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = if (thinkingLevel == ThinkingLevel.MEDIUM) "● " else "○ ",
+                                color = if (thinkingLevel == ThinkingLevel.MEDIUM) Color(0xFFD3C8FF) else TextMuted
+                            )
+                            Column {
+                                Text("MEDIUM (Рекомендуется)", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                Text("Сбалансированное рассуждение", color = TextSecondary, fontSize = 11.sp)
+                            }
+                        }
+                    },
+                    onClick = {
+                        onThinkingLevelSelected(ThinkingLevel.MEDIUM)
+                        thinkingMenuExpanded = false
+                    }
+                )
+                DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = if (thinkingLevel == ThinkingLevel.LOW) "● " else "○ ",
+                                color = if (thinkingLevel == ThinkingLevel.LOW) Color(0xFFD3C8FF) else TextMuted
+                            )
+                            Column {
+                                Text("LOW", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                Text("Быстрый ответ (минимальная задержка)", color = TextSecondary, fontSize = 11.sp)
+                            }
+                        }
+                    },
+                    onClick = {
+                        onThinkingLevelSelected(ThinkingLevel.LOW)
+                        thinkingMenuExpanded = false
+                    }
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.width(6.dp))
+
+        // Поле ввода с плавным собственным скроллом
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -1724,7 +1884,6 @@ fun ChatGptInputBar(
                 )
             }
 
-            // НЮАНС 3: Скролл verticalScroll(inputScrollState) навешан прямо на BasicTextField
             BasicTextField(
                 value = text,
                 onValueChange = onTextChanged,
@@ -1770,6 +1929,7 @@ fun ChatGptInputBar(
 
         Spacer(modifier = Modifier.width(8.dp))
 
+        // Кнопка Отправки / Остановки
         Box(
             modifier = Modifier
                 .minimumInteractiveComponentSize()

@@ -1,5 +1,6 @@
 package com.clientg
 
+import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
@@ -18,9 +19,11 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -39,13 +42,13 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.liveRegion
-import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -54,9 +57,11 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
@@ -68,11 +73,10 @@ import com.clientg.network.ThinkingLevel
 import com.clientg.presentation.ChatUiSideEffect
 import com.clientg.presentation.ChatViewModel
 import com.clientg.presentation.UiChatMessage
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 // ====================================================================
-// Палитра True Dark AMOLED под Samsung Galaxy S23 Ultra
+// Палитра True Dark AMOLED (с соблюдением стандарта контрастности WCAG 2.1 AA)
 // ====================================================================
 
 private val AmoledBg = Color(0xFF000000)
@@ -81,8 +85,8 @@ private val AmoledSurface = Color(0xFF171717)
 private val AmoledInputBarBg = Color(0xFF1E1E1E)
 private val AmoledButtonBg = Color(0xFF282828)
 private val TextPrimary = Color(0xFFF2F2F2)
-private val TextSecondary = Color(0xFF8E8E93)
-private val TextMuted = Color(0xFF555555)
+private val TextSecondary = Color(0xFFB0B0B5)
+private val TextMuted = Color(0xFF9E9E9E) // Соответствие WCAG AA (контрастность > 7.5:1 на черном)
 
 private val ThinkingGlowStart = Color(0xFF4C8DFF)
 private val ThinkingGlowEnd = Color(0xFF6C5CE7)
@@ -219,20 +223,25 @@ fun ChatGptScreen(
             val total = listState.layoutInfo.totalItemsCount
             if (total == 0) return@derivedStateOf true
             val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            lastVisible >= total - 2
+            lastVisible >= total - 3
         }
     }
 
-    BackHandler(enabled = uiState.isApiKeyDialogOpen) {
-        viewModel.onCloseApiKeyDialog()
+    // Безопасный перехват жеста "Назад": закрывает диалог или останавливает генерацию
+    BackHandler(enabled = uiState.isApiKeyDialogOpen || uiState.isGenerating) {
+        if (uiState.isApiKeyDialogOpen) {
+            viewModel.onCloseApiKeyDialog()
+        } else if (uiState.isGenerating) {
+            viewModel.onCancelGeneration()
+        }
     }
 
     LaunchedEffect(Unit) {
         viewModel.uiEffects.collect { effect ->
             when (effect) {
                 is ChatUiSideEffect.ScrollToBottom -> {
-                    if (isAtBottom && uiState.messages.isNotEmpty()) {
-                        listState.animateScrollToItem(uiState.messages.size - 1)
+                    if (uiState.messages.isNotEmpty()) {
+                        listState.animateScrollToItem(uiState.messages.lastIndex)
                     }
                 }
                 is ChatUiSideEffect.HapticLightTick -> {
@@ -257,13 +266,13 @@ fun ChatGptScreen(
         uri?.let { viewModel.onAttachFileUri(it) }
     }
 
+    // Идеальная обработка WindowInsets без двойных отступов клавиатуры
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(AmoledBg)
             .statusBarsPadding()
-            .imePadding()
-            .navigationBarsPadding()
+            .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             ChatTopBar(
@@ -309,7 +318,12 @@ fun ChatGptScreen(
                                 onToggleThinking = { viewModel.onToggleThinkingAccordion(message.id) },
                                 onOpenUrl = { url ->
                                     runCatching {
-                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                                            if (context !is Activity) {
+                                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            }
+                                        }
+                                        context.startActivity(intent)
                                     }
                                 },
                                 onRegenerate = { viewModel.onRetryLastMessage() },
@@ -318,6 +332,9 @@ fun ChatGptScreen(
                                         action = Intent.ACTION_SEND
                                         putExtra(Intent.EXTRA_TEXT, textToShare)
                                         type = "text/plain"
+                                        if (context !is Activity) {
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
                                     }
                                     context.startActivity(Intent.createChooser(sendIntent, "Поделиться"))
                                 }
@@ -325,7 +342,6 @@ fun ChatGptScreen(
                         }
                     }
 
-                    // Обернуто в явный Column для устранения DSL_SCOPE_VIOLATION компилятора K2
                     Column(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
@@ -340,7 +356,9 @@ fun ChatGptScreen(
                             FloatingScrollBottomButton(
                                 onClick = {
                                     coroutineScope.launch {
-                                        listState.animateScrollToItem(uiState.messages.size - 1)
+                                        if (uiState.messages.isNotEmpty()) {
+                                            listState.animateScrollToItem(uiState.messages.lastIndex)
+                                        }
                                     }
                                 }
                             )
@@ -360,17 +378,10 @@ fun ChatGptScreen(
                 text = uiState.inputText,
                 isGenerating = uiState.isGenerating,
                 enableSearch = uiState.enableSearch,
+                hasAttachments = uiState.attachedFiles.isNotEmpty(),
                 onTextChanged = { viewModel.onInputTextChanged(it) },
                 onToggleSearch = { viewModel.onToggleSearch(!uiState.enableSearch) },
-                onSendMessage = {
-                    viewModel.onSendMessage()
-                    coroutineScope.launch {
-                        delay(60)
-                        if (uiState.messages.isNotEmpty()) {
-                            listState.animateScrollToItem(uiState.messages.size)
-                        }
-                    }
-                },
+                onSendMessage = { viewModel.onSendMessage() },
                 onCancelGeneration = { viewModel.onCancelGeneration() },
                 onAttachClick = {
                     filePickerLauncher.launch(
@@ -379,8 +390,7 @@ fun ChatGptScreen(
                             "application/json",
                             "application/xml",
                             "application/javascript",
-                            "application/x-yaml",
-                            "application/octet-stream"
+                            "application/x-yaml"
                         )
                     )
                 }
@@ -670,7 +680,7 @@ private fun ChatMessageItem(
 
     LaunchedEffect(isCopied) {
         if (isCopied) {
-            delay(1500)
+            kotlinx.coroutines.delay(1500)
             isCopied = false
         }
     }
@@ -702,21 +712,23 @@ private fun ChatMessageItem(
                 }
             }
 
-            Box(
-                modifier = Modifier
-                    .widthIn(max = 310.dp)
-                    .clip(RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp))
-                    .background(Color(0xFF242424))
-                    .border(1.dp, Color(0xFF333333), RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp))
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-            ) {
-                SelectionContainer {
-                    Text(
-                        text = message.text,
-                        color = TextPrimary,
-                        fontSize = 15.sp,
-                        lineHeight = 22.sp
-                    )
+            if (message.text.isNotBlank()) {
+                Box(
+                    modifier = Modifier
+                        .widthIn(max = 310.dp)
+                        .clip(RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp))
+                        .background(Color(0xFF242424))
+                        .border(1.dp, Color(0xFF333333), RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp))
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                ) {
+                    SelectionContainer {
+                        Text(
+                            text = message.text,
+                            color = TextPrimary,
+                            fontSize = 15.sp,
+                            lineHeight = 22.sp
+                        )
+                    }
                 }
             }
         } else {
@@ -743,7 +755,7 @@ private fun ChatMessageItem(
 
                 if (message.text.isNotEmpty()) {
                     SelectionContainer {
-                        NativeMarkdownContent(text = message.text)
+                        NativeMarkdownContent(text = message.text, onOpenUrl = onOpenUrl)
                     }
                 } else if (message.isStreaming && !message.isThinkingActive) {
                     Text(
@@ -908,7 +920,7 @@ private fun ThinkingAccordionCard(
                 exit = shrinkVertically(animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeOut()
             ) {
                 Column(modifier = Modifier.padding(top = 10.dp)) {
-                    Divider(color = ThinkingBorder, thickness = 0.5.dp)
+                    HorizontalDivider(color = ThinkingBorder, thickness = 0.5.dp)
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = thoughtText.ifEmpty { "Анализ контекста и синтез ответа..." },
@@ -997,11 +1009,14 @@ private fun SearchGroundingBlock(
 }
 
 // ====================================================================
-// Нативный Markdown-парсер
+// Нативный Markdown-парсер без Layout Thrashing
 // ====================================================================
 
 @Composable
-private fun NativeMarkdownContent(text: String) {
+private fun NativeMarkdownContent(
+    text: String,
+    onOpenUrl: (String) -> Unit
+) {
     val blocks = remember(text) { parseMarkdownBlocks(text) }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1012,9 +1027,12 @@ private fun NativeMarkdownContent(text: String) {
                         text = block.text,
                         color = TextPrimary,
                         fontSize = when (block.level) {
-                            1 -> 20.sp
-                            2 -> 18.sp
-                            else -> 16.sp
+                            1 -> 22.sp
+                            2 -> 20.sp
+                            3 -> 18.sp
+                            4 -> 16.sp
+                            5 -> 15.sp
+                            else -> 14.sp
                         },
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(top = 6.dp, bottom = 2.dp)
@@ -1055,7 +1073,7 @@ private fun CodeBlockCard(language: String, content: String) {
 
     LaunchedEffect(isCopied) {
         if (isCopied) {
-            delay(1500)
+            kotlinx.coroutines.delay(1500)
             isCopied = false
         }
     }
@@ -1165,14 +1183,18 @@ private fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
         val afterStartFence = startFence + fence.length
         val langEnd = input.indexOf('\n', afterStartFence)
         if (langEnd == -1) {
-            parseLinesIntoBlocks(input.substring(cursor), blocks)
+            // Незакрытый блок во время стриминга кода: сразу рендерим как блок кода без скачков
+            val code = input.substring(afterStartFence)
+            blocks.add(MarkdownBlock.Code("", code))
             break
         }
 
         val language = input.substring(afterStartFence, langEnd).trim()
         val endFence = input.indexOf(fence, langEnd + 1)
         if (endFence == -1) {
-            parseLinesIntoBlocks(input.substring(cursor), blocks)
+            // Незакрытый блок с определенным языком: отображаем непрерывно
+            val code = input.substring(langEnd + 1)
+            blocks.add(MarkdownBlock.Code(language, code))
             break
         }
 
@@ -1185,18 +1207,40 @@ private fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
 
 private fun parseLinesIntoBlocks(text: String, out: MutableList<MarkdownBlock>) {
     val lines = text.lines()
-    for (line in lines) {
-        val trimmed = line.trim()
-        if (trimmed.isEmpty()) continue
+    val paragraphBuffer = StringBuilder()
 
-        when {
-            trimmed.startsWith("### ") -> out.add(MarkdownBlock.Header(3, trimmed.removePrefix("### ").trim()))
-            trimmed.startsWith("## ") -> out.add(MarkdownBlock.Header(2, trimmed.removePrefix("## ").trim()))
-            trimmed.startsWith("# ") -> out.add(MarkdownBlock.Header(1, trimmed.removePrefix("# ").trim()))
-            trimmed.startsWith("- ") || trimmed.startsWith("* ") -> out.add(MarkdownBlock.Bullet(trimmed.substring(2).trim()))
-            else -> out.add(MarkdownBlock.Paragraph(line))
+    fun flushParagraph() {
+        if (paragraphBuffer.isNotEmpty()) {
+            out.add(MarkdownBlock.Paragraph(paragraphBuffer.toString().trim()))
+            paragraphBuffer.setLength(0)
         }
     }
+
+    for (line in lines) {
+        val trimmed = line.trim()
+        if (trimmed.isEmpty()) {
+            flushParagraph()
+            continue
+        }
+
+        when {
+            trimmed.startsWith("###### ") -> { flushParagraph(); out.add(MarkdownBlock.Header(6, trimmed.removePrefix("###### ").trim())) }
+            trimmed.startsWith("##### ") -> { flushParagraph(); out.add(MarkdownBlock.Header(5, trimmed.removePrefix("##### ").trim())) }
+            trimmed.startsWith("#### ") -> { flushParagraph(); out.add(MarkdownBlock.Header(4, trimmed.removePrefix("#### ").trim())) }
+            trimmed.startsWith("### ") -> { flushParagraph(); out.add(MarkdownBlock.Header(3, trimmed.removePrefix("### ").trim())) }
+            trimmed.startsWith("## ") -> { flushParagraph(); out.add(MarkdownBlock.Header(2, trimmed.removePrefix("## ").trim())) }
+            trimmed.startsWith("# ") -> { flushParagraph(); out.add(MarkdownBlock.Header(1, trimmed.removePrefix("# ").trim())) }
+            trimmed.startsWith("- ") || trimmed.startsWith("* ") -> {
+                flushParagraph()
+                out.add(MarkdownBlock.Bullet(trimmed.substring(2).trim()))
+            }
+            else -> {
+                if (paragraphBuffer.isNotEmpty()) paragraphBuffer.append("\n")
+                paragraphBuffer.append(line)
+            }
+        }
+    }
+    flushParagraph()
 }
 
 private fun parseInlineMarkdown(text: String): AnnotatedString {
@@ -1222,6 +1266,18 @@ private fun parseInlineMarkdown(text: String): AnnotatedString {
                 }
             }
 
+            if (text.startsWith("***", i)) {
+                val nextStars = text.indexOf("***", i + 3)
+                if (nextStars != -1) {
+                    val content = text.substring(i + 3, nextStars)
+                    withStyle(SpanStyle(fontWeight = FontWeight.Bold, fontStyle = FontStyle.Italic, color = TextPrimary)) {
+                        append(content)
+                    }
+                    i = nextStars + 3
+                    continue
+                }
+            }
+
             if (text.startsWith("**", i)) {
                 val nextStars = text.indexOf("**", i + 2)
                 if (nextStars != -1) {
@@ -1230,6 +1286,38 @@ private fun parseInlineMarkdown(text: String): AnnotatedString {
                         append(boldText)
                     }
                     i = nextStars + 2
+                    continue
+                }
+            }
+
+            if (text.startsWith("*", i)) {
+                val nextStar = text.indexOf('*', i + 1)
+                if (nextStar != -1) {
+                    val italicText = text.substring(i + 1, nextStar)
+                    withStyle(SpanStyle(fontStyle = FontStyle.Italic, color = TextPrimary)) {
+                        append(italicText)
+                    }
+                    i = nextStar + 1
+                    continue
+                }
+            }
+
+            if (text.startsWith("[", i)) {
+                val closeBracket = text.indexOf(']', i + 1)
+                val openParen = text.indexOf('(', closeBracket.coerceAtLeast(0))
+                val closeParen = text.indexOf(')', openParen.coerceAtLeast(0))
+                if (closeBracket != -1 && openParen == closeBracket + 1 && closeParen != -1) {
+                    val linkTitle = text.substring(i + 1, closeBracket)
+                    withStyle(
+                        SpanStyle(
+                            color = SearchActiveText,
+                            textDecoration = TextDecoration.Underline,
+                            fontWeight = FontWeight.Medium
+                        )
+                    ) {
+                        append(linkTitle)
+                    }
+                    i = closeParen + 1
                     continue
                 }
             }
@@ -1297,9 +1385,8 @@ private fun FloatingScrollBottomButton(
     onClick: () -> Unit
 ) {
     Surface(
-        modifier = modifier
-            .size(38.dp)
-            .clickable(onClick = onClick),
+        onClick = onClick,
+        modifier = modifier.size(38.dp),
         shape = CircleShape,
         color = AmoledSurface,
         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF333333)),
@@ -1317,7 +1404,7 @@ private fun FloatingScrollBottomButton(
 }
 
 // ====================================================================
-// Капсула ввода с фокусом BringIntoView
+// Капсула ввода с поддержкой Enter на DeX и правильной доступностью
 // ====================================================================
 
 @Composable
@@ -1325,6 +1412,7 @@ fun ChatGptInputBar(
     text: String,
     isGenerating: Boolean,
     enableSearch: Boolean,
+    hasAttachments: Boolean,
     onTextChanged: (String) -> Unit,
     onToggleSearch: () -> Unit,
     onSendMessage: () -> Unit,
@@ -1332,7 +1420,7 @@ fun ChatGptInputBar(
     onAttachClick: () -> Unit
 ) {
     val scrollState = rememberScrollState()
-    val isSendEnabled = text.isNotBlank() && !isGenerating
+    val isSendEnabled = (text.isNotBlank() || hasAttachments) && !isGenerating
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
     val coroutineScope = rememberCoroutineScope()
 
@@ -1370,6 +1458,7 @@ fun ChatGptInputBar(
 
         Spacer(modifier = Modifier.width(6.dp))
 
+        // Доступный переключатель поиска с нативной поддержкой TalkBack
         Box(
             modifier = Modifier
                 .size(38.dp)
@@ -1380,8 +1469,11 @@ fun ChatGptInputBar(
                     color = if (enableSearch) SearchActiveBorder else Color.Transparent,
                     shape = CircleShape
                 )
-                .semantics { role = Role.Switch }
-                .clickable(onClick = onToggleSearch),
+                .toggleable(
+                    value = enableSearch,
+                    role = Role.Switch,
+                    onValueChange = { onToggleSearch() }
+                ),
             contentAlignment = Alignment.Center
         ) {
             Icon(
@@ -1420,6 +1512,15 @@ fun ChatGptInputBar(
                         if (event.isFocused) {
                             coroutineScope.launch { bringIntoViewRequester.bringIntoView() }
                         }
+                    }
+                    .onPreviewKeyEvent { event ->
+                        // Поддержка Enter на физических клавиатурах / Samsung DeX
+                        if (event.key == Key.Enter && event.type == KeyEventType.KeyDown) {
+                            if (!event.isShiftPressed && isSendEnabled) {
+                                onSendMessage()
+                                true
+                            } else false
+                        } else false
                     },
                 textStyle = TextStyle(
                     color = TextPrimary,
@@ -1427,7 +1528,15 @@ fun ChatGptInputBar(
                     lineHeight = 21.sp
                 ),
                 cursorBrush = SolidColor(Color.White),
-                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences)
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Sentences,
+                    imeAction = ImeAction.Send
+                ),
+                keyboardActions = KeyboardActions(
+                    onSend = {
+                        if (isSendEnabled) onSendMessage()
+                    }
+                )
             )
         }
 
@@ -1476,7 +1585,7 @@ private fun ApiKeyDialog(
     onSave: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var key by remember { mutableStateOf(currentKey) }
+    var key by remember(currentKey) { mutableStateOf(currentKey) }
     var passwordVisible by remember { mutableStateOf(false) }
     val haptic = LocalHapticFeedback.current
 

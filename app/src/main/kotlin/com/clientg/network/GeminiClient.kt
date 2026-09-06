@@ -10,6 +10,7 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -889,7 +890,7 @@ class GeminiClient(
                 val totalDuration = (SystemClock.elapsedRealtime() - startTime).coerceAtLeast(0L)
                 emit(GeminiStreamEvent.Completed(finalFinishReason, totalDuration, latestThoughtSignature))
             }
-        } catch (e: CancellationException) {
+        } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: GeminiApiException) {
             throw e

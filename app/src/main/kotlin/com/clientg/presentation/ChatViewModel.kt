@@ -509,6 +509,7 @@ class ChatViewModel(
                     }
 
                     is GeminiStreamEvent.ThinkingCompleted -> {
+                        // Суммируем длительность, если модель размышляла в несколько фаз
                         msg.copy(
                             isThinkingActive = false,
                             isThinkingExpanded = false,
@@ -576,6 +577,7 @@ class ChatViewModel(
                 isGenerating = false,
                 errorMessage = error.userFriendlyMessage,
                 retryCountdownSeconds = error.retryAfterSeconds,
+                // Удаляем пустой плейсхолдер сообщения, если генерация упала до первого токена
                 messages = state.messages.filterNot { msg ->
                     msg.id == assistantMessageId && msg.text.isEmpty() && msg.thoughtText.isEmpty()
                 }
@@ -630,3 +632,4 @@ class ChatViewModel(
         }
     }
 }
+

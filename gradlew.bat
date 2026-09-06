@@ -17,7 +17,7 @@
 @if "%DEBUG%" == "" @echo off
 @rem ##########################################################################
 @rem
-@rem  Gradle startup script for Windows (Zero-JAR Bootstrap Edition)
+@rem  Gradle startup script for Windows (Secure Bootstrap Edition)
 @rem
 @rem ##########################################################################
 
@@ -29,24 +29,34 @@ set APP_BASE_NAME=%~n0
 set APP_HOME=%DIRNAME%
 
 @rem --------------------------------------------------------------------------
-@rem Bootstrap Hook: Безопасная загрузка gradle-wrapper.jar при его отсутствии
+@rem Безопасный Bootstrap Hook: Загрузка с обязательной проверкой SHA-256
 @rem --------------------------------------------------------------------------
 set WRAPPER_JAR=%APP_HOME%gradle\wrapper\gradle-wrapper.jar
 if not exist "%WRAPPER_JAR%" (
-    echo [gradlew] gradle-wrapper.jar not found. Initializing bootstrap download...
+    echo [gradlew] gradle-wrapper.jar not found. Initializing secure bootstrap download...
     if not exist "%APP_HOME%gradle\wrapper" mkdir "%APP_HOME%gradle\wrapper"
     
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "$jar = '%WRAPPER_JAR%';" ^
+        "$url = 'https://raw.githubusercontent.com/gradle/gradle/v8.13.0/gradle/wrapper/gradle-wrapper.jar';" ^
+        "$expectedHash = '4ba9b0b467b7fec965b6a71e8da6eb85cf6bd9868eec2496a7576f3f0cfc24d6';" ^
         "$tls = [Net.SecurityProtocolType]::Tls12; " ^
         "try { $tls = $tls -bor [Net.SecurityProtocolType]::Tls13 } catch {}; " ^
         "[Net.ServicePointManager]::SecurityProtocol = $tls; " ^
-        "(New-Object Net.WebClient).DownloadFile('https://raw.githubusercontent.com/gradle/gradle/v8.13.0/gradle/wrapper/gradle-wrapper.jar', '%WRAPPER_JAR%')"
+        "(New-Object Net.WebClient).DownloadFile($url, $jar); " ^
+        "if (-not (Test-Path $jar)) { Write-Error '[gradlew] Download failed.'; exit 1 }; " ^
+        "$actualHash = (Get-FileHash -Path $jar -Algorithm SHA256).Hash.ToLower(); " ^
+        "if ($actualHash -ne $expectedHash) { " ^
+        "    Remove-Item -Force $jar; " ^
+        "    Write-Error '[gradlew] SECURITY ERROR: Checksum validation failed for gradle-wrapper.jar!'; " ^
+        "    exit 1; " ^
+        "}"
 
-    if not exist "%WRAPPER_JAR%" (
-        echo [gradlew] ERROR: Failed to download gradle-wrapper.jar. Check your internet connection.
+    if "%ERRORLEVEL%" neq "0" (
+        echo [gradlew] ERROR: Failed to download or verify gradle-wrapper.jar.
         exit /b 1
     )
-    echo [gradlew] gradle-wrapper.jar downloaded successfully.
+    echo [gradlew] gradle-wrapper.jar verified and ready.
 )
 @rem --------------------------------------------------------------------------
 

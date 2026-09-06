@@ -13,6 +13,7 @@ import androidx.activity.viewModels
 import androidx.core.content.IntentCompat
 import androidx.core.view.WindowCompat
 import com.clientg.presentation.ChatViewModel
+import com.clientg.util.AppLogger
 import android.graphics.Color as AndroidColor
 
 class MainActivity : ComponentActivity() {
@@ -20,10 +21,10 @@ class MainActivity : ComponentActivity() {
     private val chatViewModel: ChatViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Устранение Overdraw: аппаратная заливка окна черным цветом (#000000)
+        AppLogger.i(AppLogger.TAG_APP, "onCreate: Старт MainActivity (savedInstanceState=$savedInstanceState, action=${intent?.action})")
+
         window.setBackgroundDrawable(ColorDrawable(AndroidColor.BLACK))
 
-        // Сквозной режим Edge-to-Edge без затемнений
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT)
@@ -45,6 +46,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        AppLogger.i(AppLogger.TAG_APP, "onNewIntent: Получен Intent: action=${intent.action}, data=${intent.data}")
         handleIncomingIntent(intent)
     }
 
@@ -57,6 +59,7 @@ class MainActivity : ComponentActivity() {
                     ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
 
                 if (fileUri != null) {
+                    AppLogger.i(AppLogger.TAG_APP, "handleIncomingIntent: ACTION_SEND файл: $fileUri")
                     chatViewModel.onAttachFileUri(fileUri)
                 }
 
@@ -64,6 +67,7 @@ class MainActivity : ComponentActivity() {
                     ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text?.toString()
 
                 if (!sharedText.isNullOrBlank()) {
+                    AppLogger.i(AppLogger.TAG_APP, "handleIncomingIntent: ACTION_SEND текст (${sharedText.length} символов)")
                     chatViewModel.onInputTextChanged(sharedText)
                 }
                 intent.action = null
@@ -77,9 +81,11 @@ class MainActivity : ComponentActivity() {
                 )
 
                 if (!fileUris.isNullOrEmpty()) {
+                    AppLogger.i(AppLogger.TAG_APP, "handleIncomingIntent: ACTION_SEND_MULTIPLE: ${fileUris.size} файлов")
                     fileUris.forEach { uri -> chatViewModel.onAttachFileUri(uri) }
                 } else {
                     intent.clipData?.let { clip ->
+                        AppLogger.i(AppLogger.TAG_APP, "handleIncomingIntent: ACTION_SEND_MULTIPLE через clipData: ${clip.itemCount} файлов")
                         for (i in 0 until clip.itemCount) {
                             clip.getItemAt(i).uri?.let { uri ->
                                 chatViewModel.onAttachFileUri(uri)
@@ -99,7 +105,6 @@ class MainActivity : ComponentActivity() {
         window.isStatusBarContrastEnforced = false
 
         val params = window.attributes
-        // Без принудительного форсирования 120 Гц: контроллер экрана сам работает на своей физической частоте
         params.layoutInDisplayCutoutMode =
             WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         window.attributes = params
@@ -107,5 +112,6 @@ class MainActivity : ComponentActivity() {
         val insetsController = WindowCompat.getInsetsController(window, window.decorView)
         insetsController.isAppearanceLightStatusBars = false
         insetsController.isAppearanceLightNavigationBars = false
+        AppLogger.d(AppLogger.TAG_APP, "configureDisplayWindow: Edge-to-Edge и Cutout настроены")
     }
 }

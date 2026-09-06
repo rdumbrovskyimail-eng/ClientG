@@ -44,8 +44,8 @@ if [ ! -s "$WRAPPER_JAR" ]; then
     mkdir -p "$APP_HOME/gradle/wrapper" || exit 1
 
     JAR_URL="https://raw.githubusercontent.com/gradle/gradle/v8.13.0/gradle/wrapper/gradle-wrapper.jar"
-    # Официальный SHA-256 хэш исполняемого файла gradle-wrapper.jar
-    EXPECTED_SHA256="4ba9b0b467b7fec965b6a71e8da6eb85cf6bd9868eec2496a7576f3f0cfc24d6"
+    # Официальный SHA-256 хэш исполняемого файла gradle-wrapper.jar (v8.13.0)
+    EXPECTED_SHA256="81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f"
 
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL "$JAR_URL" -o "$WRAPPER_JAR"

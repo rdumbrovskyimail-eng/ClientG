@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -16,6 +17,7 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+        // Аппаратная оптимизация: чистый 64-битный код под Snapdragon 8 Gen 2 for Galaxy
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -30,7 +32,7 @@ android {
             )
         }
         debug {
-            // Отключаем ресурсоемкое сжатие PNG при сборке для отладки
+            // Отключаем ресурсоемкое сжатие PNG при отладочной сборке
             isCrunchPngs = false
         }
     }
@@ -42,26 +44,62 @@ android {
 
     buildFeatures {
         compose = true
-        // Отключаем неиспользуемые генераторы, ускоряя проверку ресурсов
         buildConfig = false
         resValues = false
         shaders = false
+    }
+
+    packaging {
+        resources {
+            // Исключение дублирующихся метаданных Ktor CIO и Coroutines
+            excludes += listOf(
+                "/META-INF/{AL2.0,LGPL2.1}",
+                "/META-INF/INDEX.LIST",
+                "/META-INF/io.netty.versions.properties",
+                "META-INF/versions/**"
+            )
+        }
     }
 }
 
 kotlin {
     jvmToolchain(21)
+
+    compilerOptions {
+        freeCompilerArgs.addAll(
+            "-opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi",
+            "-opt-in=kotlinx.serialization.ExperimentalSerializationApi"
+        )
+    }
 }
 
 dependencies {
+    // --- Android Core & Lifecycle ---
+    implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
+
+    // --- Jetpack Compose UI (BOM 2026.08.00) ---
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
-    implementation("androidx.compose.material:material-icons-core")
+    implementation(libs.androidx.compose.material.icons)
+
+    // --- Асинхронность и потоки (Coroutines 1.11.0) ---
+    implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.kotlinx.coroutines.android)
+
+    // --- Высокоскоростной сетевой клиент Ktor (3.5.2 CIO) ---
+    implementation(libs.ktor.client.core)
+    implementation(libs.ktor.client.cio)
+
+    // --- Сериализация JSON (Kotlinx Serialization 1.12.0-RC) ---
+    implementation(libs.kotlinx.serialization.json)
+
+    // --- Аппаратная безопасность Samsung Knox Vault (Crypto 1.1.0) ---
+    implementation(libs.androidx.security.crypto)
 }
 
-// Отключаем проверку метаданных
+// Отключаем проверку метаданных AAR
 tasks.matching { it.name.contains("AarMetadata") }.configureEach {
     enabled = false
 }

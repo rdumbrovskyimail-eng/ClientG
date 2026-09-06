@@ -13,7 +13,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -27,6 +26,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -61,6 +61,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.clientg.data.ChatSessionMetadata
 import com.clientg.network.ChatRole
 import com.clientg.network.GroundingSource
 import com.clientg.network.TextAttachment
@@ -202,7 +203,7 @@ private val CopyIcon: ImageVector by lazy {
 }
 
 // ====================================================================
-// Главный экран: ChatGptScreen
+// Главный экран: ChatGptScreen со шторкой истории
 // ====================================================================
 
 @Composable
@@ -214,6 +215,7 @@ fun ChatGptScreen(
     val haptic = LocalHapticFeedback.current
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     var showClearChatDialog by remember { mutableStateOf(false) }
 
     val currentView = LocalView.current
@@ -234,7 +236,6 @@ fun ChatGptScreen(
         }
     }
 
-    // ТРОТТЛИНГ АВТОСКРОЛЛА: автоскролл вызывается квантованными порциями, а не на каждом символе
     val lastMessage = uiState.messages.lastOrNull()
     val textBucket = (lastMessage?.text?.length ?: 0) / 32
     val thoughtBucket = (lastMessage?.thoughtText?.length ?: 0) / 48
@@ -245,8 +246,10 @@ fun ChatGptScreen(
         }
     }
 
-    BackHandler(enabled = uiState.isApiKeyDialogOpen || uiState.isGenerating || showClearChatDialog) {
-        if (showClearChatDialog) {
+    BackHandler(enabled = drawerState.isOpen || uiState.isApiKeyDialogOpen || uiState.isGenerating || showClearChatDialog) {
+        if (drawerState.isOpen) {
+            coroutineScope.launch { drawerState.close() }
+        } else if (showClearChatDialog) {
             showClearChatDialog = false
         } else if (uiState.isApiKeyDialogOpen) {
             viewModel.onCloseApiKeyDialog()
@@ -285,175 +288,384 @@ fun ChatGptScreen(
         uri?.let { viewModel.onAttachFileUri(it) }
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top))
-            .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        gesturesEnabled = true,
+        scrimColor = Color.Black.copy(alpha = 0.65f),
+        drawerContent = {
+            ModalDrawerSheet(
+                drawerContainerColor = Color(0xFF101010),
+                drawerContentColor = TextPrimary,
+                modifier = Modifier
+                    .width(310.dp)
+                    .fillMaxHeight()
+                    .border(1.dp, Color(0xFF222222), RoundedCornerShape(topEnd = 16.dp, bottomEnd = 16.dp))
+            ) {
+                ChatHistoryDrawerContent(
+                    activeSessionId = uiState.currentSessionId,
+                    sessions = uiState.sessionList,
+                    onNewChatClick = {
+                        viewModel.onNewSession()
+                        coroutineScope.launch { drawerState.close() }
+                    },
+                    onSelectSession = { id ->
+                        viewModel.onSelectSession(id)
+                        coroutineScope.launch { drawerState.close() }
+                    },
+                    onDeleteSession = { id ->
+                        viewModel.onDeleteSession(id)
+                    }
+                )
+            }
+        }
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            ChatTopBar(
-                currentLevel = uiState.thinkingLevel,
-                onClearChat = { showClearChatDialog = true },
-                onOpenApiKeyDialog = { viewModel.onOpenApiKeyDialog() },
-                onThinkingLevelSelected = { viewModel.onThinkingLevelChanged(it) }
-            )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top))
+                .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                ChatTopBar(
+                    currentLevel = uiState.thinkingLevel,
+                    hasPinnedCache = uiState.pinnedCacheId != null,
+                    onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
+                    onClearChat = { showClearChatDialog = true },
+                    onOpenApiKeyDialog = { viewModel.onOpenApiKeyDialog() },
+                    onThinkingLevelSelected = { viewModel.onThinkingLevelChanged(it) }
+                )
 
-            if (uiState.errorMessage != null) {
-                ErrorBanner(
-                    message = uiState.errorMessage ?: "",
-                    retrySeconds = uiState.retryCountdownSeconds,
-                    onRetry = { viewModel.onRetryLastMessage() },
-                    onOpenKeyDialog = { viewModel.onOpenApiKeyDialog() },
-                    onDismiss = { viewModel.onDismissError() }
+                // Баннер фиксации явного кэша токенов в памяти TPU Google
+                AnimatedVisibility(
+                    visible = uiState.isPinningCache,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
+                ) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        color = Color(0xFF0F1E2E),
+                        shape = RoundedCornerShape(8.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF183B5E))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = SearchActiveText
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "Фиксация контекста в Google TPU (скидка 90% на повтор)...",
+                                color = SearchActiveText,
+                                fontSize = 12.sp,
+                                style = DefaultTextStyle
+                            )
+                        }
+                    }
+                }
+
+                if (uiState.errorMessage != null) {
+                    ErrorBanner(
+                        message = uiState.errorMessage ?: "",
+                        retrySeconds = uiState.retryCountdownSeconds,
+                        onRetry = { viewModel.onRetryLastMessage() },
+                        onOpenKeyDialog = { viewModel.onOpenApiKeyDialog() },
+                        onDismiss = { viewModel.onDismissError() }
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                ) {
+                    if (uiState.messages.isEmpty()) {
+                        EmptyStateHero(
+                            onSuggestionClick = { prompt ->
+                                viewModel.onInputTextChanged(prompt)
+                            }
+                        )
+                    } else {
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
+                            verticalArrangement = Arrangement.spacedBy(18.dp)
+                        ) {
+                            items(
+                                items = uiState.messages,
+                                key = { it.id }
+                            ) { message ->
+                                ChatMessageItem(
+                                    message = message,
+                                    onToggleThinking = { viewModel.onToggleThinkingAccordion(message.id) },
+                                    onOpenUrl = { url ->
+                                        runCatching {
+                                            val uri = Uri.parse(url)
+                                            val scheme = uri.scheme?.lowercase(Locale.US)
+                                            if (scheme == "https" || scheme == "http") {
+                                                val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                                                    if (context !is Activity) {
+                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                    }
+                                                }
+                                                context.startActivity(intent)
+                                            }
+                                        }
+                                    },
+                                    onRegenerate = { viewModel.onRetryMessage(message.id) },
+                                    onShareText = { textToShare ->
+                                        val sendIntent = Intent().apply {
+                                            action = Intent.ACTION_SEND
+                                            putExtra(Intent.EXTRA_TEXT, textToShare)
+                                            type = "text/plain"
+                                        }
+                                        val chooser = Intent.createChooser(sendIntent, "Поделиться").apply {
+                                            if (context !is Activity) {
+                                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            }
+                                        }
+                                        context.startActivity(chooser)
+                                    }
+                                )
+                            }
+                        }
+
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            AnimatedVisibility(
+                                visible = !isAtBottom && uiState.messages.isNotEmpty(),
+                                enter = scaleIn(animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f)) + fadeIn(),
+                                exit = scaleOut() + fadeOut()
+                            ) {
+                                FloatingScrollBottomButton(
+                                    onClick = {
+                                        coroutineScope.launch {
+                                            if (uiState.messages.isNotEmpty()) {
+                                                listState.animateScrollToItem(uiState.messages.lastIndex)
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (uiState.attachedFiles.isNotEmpty()) {
+                    AttachmentChipsBar(
+                        attachments = uiState.attachedFiles,
+                        onRemove = { viewModel.onRemoveAttachment(it) }
+                    )
+                }
+
+                ChatGptInputBar(
+                    text = uiState.inputText,
+                    isGenerating = uiState.isGenerating,
+                    enableSearch = uiState.enableSearch,
+                    thinkingLevel = uiState.thinkingLevel,
+                    hasAttachments = uiState.attachedFiles.isNotEmpty(),
+                    onTextChanged = { viewModel.onInputTextChanged(it) },
+                    onToggleSearch = { viewModel.onToggleSearch(!uiState.enableSearch) },
+                    onThinkingLevelSelected = { viewModel.onThinkingLevelChanged(it) },
+                    onSendMessage = { viewModel.onSendMessage() },
+                    onCancelGeneration = { viewModel.onCancelGeneration() },
+                    onAttachClick = {
+                        filePickerLauncher.launch(
+                            arrayOf(
+                                "text/*",
+                                "application/json",
+                                "application/xml",
+                                "application/javascript",
+                                "application/x-yaml"
+                            )
+                        )
+                    }
                 )
             }
 
+            if (uiState.isApiKeyDialogOpen) {
+                ApiKeyDialog(
+                    currentKey = uiState.apiKey,
+                    onSave = { viewModel.onSaveApiKey(it) },
+                    onDismiss = { viewModel.onCloseApiKeyDialog() }
+                )
+            }
+
+            if (showClearChatDialog) {
+                AlertDialog(
+                    onDismissRequest = { showClearChatDialog = false },
+                    containerColor = AmoledSurface,
+                    title = { Text("Очистить историю диалога?", color = TextPrimary, fontWeight = FontWeight.Bold) },
+                    text = { Text("Все сообщения текущей сессии будут удалены. Зафиксированный кэш в Google TPU будет освобожден.", color = TextSecondary) },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                viewModel.onClearChat()
+                                showClearChatDialog = false
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFCF6679))
+                        ) {
+                            Text("Очистить", color = Color.White)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showClearChatDialog = false }) {
+                            Text("Отмена", color = TextSecondary)
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
+// ====================================================================
+// Содержимое боковой шторки истории (Material 3 Drawer)
+// ====================================================================
+
+@Composable
+private fun ChatHistoryDrawerContent(
+    activeSessionId: String,
+    sessions: List<ChatSessionMetadata>,
+    onNewChatClick: () -> Unit,
+    onSelectSession: (String) -> Unit,
+    onDeleteSession: (String) -> Unit
+) {
+    val drawerScrollState = rememberLazyListState()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 14.dp, vertical = 18.dp)
+    ) {
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = Color(0xFF1E1E1E),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF2E2E2E)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onNewChatClick() }
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "Новый диалог", tint = Color.White, modifier = Modifier.size(20.dp))
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = "Новый диалог",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    style = DefaultTextStyle
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        Text(
+            text = "ИСТОРИЯ СЕССИЙ",
+            color = TextMuted,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp,
+            style = DefaultTextStyle,
+            modifier = Modifier.padding(start = 6.dp, bottom = 10.dp)
+        )
+
+        if (sessions.isEmpty()) {
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth()
+                    .fillMaxWidth(),
+                contentAlignment = Alignment.Center
             ) {
-                if (uiState.messages.isEmpty()) {
-                    EmptyStateHero(
-                        onSuggestionClick = { prompt ->
-                            viewModel.onInputTextChanged(prompt)
-                        }
-                    )
-                } else {
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
-                        verticalArrangement = Arrangement.spacedBy(18.dp)
-                    ) {
-                        items(
-                            items = uiState.messages,
-                            key = { it.id }
-                        ) { message ->
-                            ChatMessageItem(
-                                message = message,
-                                onToggleThinking = { viewModel.onToggleThinkingAccordion(message.id) },
-                                onOpenUrl = { url ->
-                                    runCatching {
-                                        val uri = Uri.parse(url)
-                                        val scheme = uri.scheme?.lowercase(Locale.US)
-                                        if (scheme == "https" || scheme == "http") {
-                                            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-                                                if (context !is Activity) {
-                                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                                }
-                                            }
-                                            context.startActivity(intent)
-                                        }
-                                    }
-                                },
-                                onRegenerate = { viewModel.onRetryMessage(message.id) },
-                                onShareText = { textToShare ->
-                                    val sendIntent = Intent().apply {
-                                        action = Intent.ACTION_SEND
-                                        putExtra(Intent.EXTRA_TEXT, textToShare)
-                                        type = "text/plain"
-                                    }
-                                    val chooser = Intent.createChooser(sendIntent, "Поделиться").apply {
-                                        if (context !is Activity) {
-                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                        }
-                                    }
-                                    context.startActivity(chooser)
-                                }
-                            )
-                        }
-                    }
-
-                    Column(
+                Text("История диалогов пуста", color = TextMuted, fontSize = 13.sp, style = DefaultTextStyle)
+            }
+        } else {
+            LazyColumn(
+                state = drawerScrollState,
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(sessions, key = { it.id }) { session ->
+                    val isSelected = session.id == activeSessionId
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (isSelected) Color(0xFF16202E) else Color.Transparent,
+                        border = if (isSelected) androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF24364D)) else null,
                         modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = 12.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                            .fillMaxWidth()
+                            .clickable { onSelectSession(session.id) }
                     ) {
-                        AnimatedVisibility(
-                            visible = !isAtBottom && uiState.messages.isNotEmpty(),
-                            enter = scaleIn(animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f)) + fadeIn(),
-                            exit = scaleOut() + fadeOut()
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            FloatingScrollBottomButton(
-                                onClick = {
-                                    coroutineScope.launch {
-                                        if (uiState.messages.isNotEmpty()) {
-                                            listState.animateScrollToItem(uiState.messages.lastIndex)
-                                        }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = session.title,
+                                        color = if (isSelected) SearchActiveText else TextPrimary,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = DefaultTextStyle,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if (session.pinnedCacheId != null) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "TPU",
+                                            color = Color(0xFF81C784),
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            style = DefaultTextStyle
+                                        )
                                     }
                                 }
-                            )
+
+                                if (session.previewSnippet.isNotBlank()) {
+                                    Text(
+                                        text = session.previewSnippet,
+                                        color = TextSecondary,
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = DefaultTextStyle,
+                                        modifier = Modifier.padding(top = 2.dp)
+                                    )
+                                }
+                            }
+
+                            IconButton(
+                                onClick = { onDeleteSession(session.id) },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Удалить сессию",
+                                    tint = Color(0xFF6E6E6E),
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
                         }
                     }
                 }
             }
-
-            if (uiState.attachedFiles.isNotEmpty()) {
-                AttachmentChipsBar(
-                    attachments = uiState.attachedFiles,
-                    onRemove = { viewModel.onRemoveAttachment(it) }
-                )
-            }
-
-            ChatGptInputBar(
-                text = uiState.inputText,
-                isGenerating = uiState.isGenerating,
-                enableSearch = uiState.enableSearch,
-                thinkingLevel = uiState.thinkingLevel,
-                hasAttachments = uiState.attachedFiles.isNotEmpty(),
-                onTextChanged = { viewModel.onInputTextChanged(it) },
-                onToggleSearch = { viewModel.onToggleSearch(!uiState.enableSearch) },
-                onThinkingLevelSelected = { viewModel.onThinkingLevelChanged(it) },
-                onSendMessage = { viewModel.onSendMessage() },
-                onCancelGeneration = { viewModel.onCancelGeneration() },
-                onAttachClick = {
-                    filePickerLauncher.launch(
-                        arrayOf(
-                            "text/*",
-                            "application/json",
-                            "application/xml",
-                            "application/javascript",
-                            "application/x-yaml"
-                        )
-                    )
-                }
-            )
-        }
-
-        if (uiState.isApiKeyDialogOpen) {
-            ApiKeyDialog(
-                currentKey = uiState.apiKey,
-                onSave = { viewModel.onSaveApiKey(it) },
-                onDismiss = { viewModel.onCloseApiKeyDialog() }
-            )
-        }
-
-        if (showClearChatDialog) {
-            AlertDialog(
-                onDismissRequest = { showClearChatDialog = false },
-                containerColor = AmoledSurface,
-                title = { Text("Очистить историю диалога?", color = TextPrimary, fontWeight = FontWeight.Bold) },
-                text = { Text("Все сообщения и прикрепленные файлы будут удалены без возможности восстановления.", color = TextSecondary) },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            viewModel.onClearChat()
-                            showClearChatDialog = false
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFCF6679))
-                    ) {
-                        Text("Очистить", color = Color.White)
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showClearChatDialog = false }) {
-                        Text("Отмена", color = TextSecondary)
-                    }
-                }
-            )
         }
     }
 }
@@ -544,12 +756,14 @@ private fun EmptyStateHero(
 }
 
 // ====================================================================
-// Верхняя панель (Top Bar)
+// Верхняя панель (Top Bar) с кнопкой Drawer и индикатором TPU Cache
 // ====================================================================
 
 @Composable
 private fun ChatTopBar(
     currentLevel: ThinkingLevel,
+    hasPinnedCache: Boolean,
+    onOpenDrawer: () -> Unit,
     onClearChat: () -> Unit,
     onOpenApiKeyDialog: () -> Unit,
     onThinkingLevelSelected: (ThinkingLevel) -> Unit
@@ -559,127 +773,157 @@ private fun ChatTopBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 18.dp, vertical = 10.dp),
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Column {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "ClientG",
-                    color = TextPrimary,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Black,
-                    letterSpacing = (-0.5).sp,
-                    style = DefaultTextStyle
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(
+                onClick = onOpenDrawer,
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(AmoledSurface)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Menu,
+                    contentDescription = "История диалогов",
+                    tint = TextPrimary,
+                    modifier = Modifier.size(20.dp)
                 )
-                Spacer(modifier = Modifier.width(6.dp))
+            }
 
-                Box {
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = Color(0xFF16202E),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF24364D)),
-                        modifier = Modifier.clickable { menuExpanded = true }
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+            Spacer(modifier = Modifier.width(10.dp))
+
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "ClientG",
+                        color = TextPrimary,
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.Black,
+                        letterSpacing = (-0.5).sp,
+                        style = DefaultTextStyle
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    Box {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF16202E),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF24364D)),
+                            modifier = Modifier.clickable { menuExpanded = true }
                         ) {
-                            Text(
-                                text = "3.8 FLASH • ${currentLevel.name}",
-                                color = SearchActiveText,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                style = DefaultTextStyle
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = "3.8 FLASH • ${currentLevel.name}",
+                                    color = SearchActiveText,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    style = DefaultTextStyle
+                                )
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Icon(
+                                    imageVector = Icons.Default.KeyboardArrowDown,
+                                    contentDescription = "Уровень рассуждений",
+                                    tint = SearchActiveText,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            }
+                        }
+
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false },
+                            modifier = Modifier
+                                .background(AmoledSurface)
+                                .border(1.dp, Color(0xFF2D2D2D), RoundedCornerShape(12.dp))
+                        ) {
+                            DropdownMenuItem(
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = if (currentLevel == ThinkingLevel.HIGH) "● " else "○ ",
+                                            color = if (currentLevel == ThinkingLevel.HIGH) SearchActiveText else TextMuted
+                                        )
+                                        Column {
+                                            Text("HIGH", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                            Text("Глубокий анализ (максимум рассуждений)", color = TextSecondary, fontSize = 11.sp)
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    onThinkingLevelSelected(ThinkingLevel.HIGH)
+                                    menuExpanded = false
+                                }
                             )
-                            Spacer(modifier = Modifier.width(2.dp))
-                            Icon(
-                                imageVector = Icons.Default.KeyboardArrowDown,
-                                contentDescription = "Выбрать уровень рассуждений",
-                                tint = SearchActiveText,
-                                modifier = Modifier.size(14.dp)
+                            DropdownMenuItem(
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = if (currentLevel == ThinkingLevel.MEDIUM) "● " else "○ ",
+                                            color = if (currentLevel == ThinkingLevel.MEDIUM) SearchActiveText else TextMuted
+                                        )
+                                        Column {
+                                            Text("MEDIUM (Рекомендуется)", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                            Text("Сбалансированное рассуждение", color = TextSecondary, fontSize = 11.sp)
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    onThinkingLevelSelected(ThinkingLevel.MEDIUM)
+                                    menuExpanded = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = if (currentLevel == ThinkingLevel.LOW) "● " else "○ ",
+                                            color = if (currentLevel == ThinkingLevel.LOW) SearchActiveText else TextMuted
+                                        )
+                                        Column {
+                                            Text("LOW", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                            Text("Быстрый ответ (минимум задержки)", color = TextSecondary, fontSize = 11.sp)
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    onThinkingLevelSelected(ThinkingLevel.LOW)
+                                    menuExpanded = false
+                                }
                             )
                         }
                     }
 
-                    DropdownMenu(
-                        expanded = menuExpanded,
-                        onDismissRequest = { menuExpanded = false },
-                        modifier = Modifier
-                            .background(AmoledSurface)
-                            .border(1.dp, Color(0xFF2D2D2D), RoundedCornerShape(12.dp))
-                    ) {
-                        DropdownMenuItem(
-                            text = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = if (currentLevel == ThinkingLevel.HIGH) "● " else "○ ",
-                                        color = if (currentLevel == ThinkingLevel.HIGH) SearchActiveText else TextMuted
-                                    )
-                                    Column {
-                                        Text("HIGH", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                        Text("Глубокий анализ (максимум рассуждений)", color = TextSecondary, fontSize = 11.sp)
-                                    }
-                                }
-                            },
-                            onClick = {
-                                onThinkingLevelSelected(ThinkingLevel.HIGH)
-                                menuExpanded = false
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = if (currentLevel == ThinkingLevel.MEDIUM) "● " else "○ ",
-                                        color = if (currentLevel == ThinkingLevel.MEDIUM) SearchActiveText else TextMuted
-                                    )
-                                    Column {
-                                        Text("MEDIUM (Рекомендуется)", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                        Text("Сбалансированное рассуждение", color = TextSecondary, fontSize = 11.sp)
-                                    }
-                                }
-                            },
-                            onClick = {
-                                onThinkingLevelSelected(ThinkingLevel.MEDIUM)
-                                menuExpanded = false
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = if (currentLevel == ThinkingLevel.LOW) "● " else "○ ",
-                                        color = if (currentLevel == ThinkingLevel.LOW) SearchActiveText else TextMuted
-                                    )
-                                    Column {
-                                        Text("LOW", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                        Text("Быстрый ответ (минимум задержки)", color = TextSecondary, fontSize = 11.sp)
-                                    }
-                                }
-                            },
-                            onClick = {
-                                onThinkingLevelSelected(ThinkingLevel.LOW)
-                                menuExpanded = false
-                            }
-                        )
+                    if (hasPinnedCache) {
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFF132A1C),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF26593A))
+                        ) {
+                            Text(
+                                text = "⚡ TPU CACHE",
+                                color = Color(0xFF81C784),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            )
+                        }
                     }
                 }
             }
-            Text(
-                text = "Snapdragon 8 Gen 2 • Dynamic VSYNC Engine",
-                color = TextSecondary,
-                fontSize = 11.sp,
-                style = DefaultTextStyle
-            )
         }
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(
                 onClick = onClearChat,
                 modifier = Modifier
-                    .size(40.dp)
+                    .size(38.dp)
                     .clip(CircleShape)
                     .background(AmoledSurface)
             ) {
@@ -696,7 +940,7 @@ private fun ChatTopBar(
             IconButton(
                 onClick = onOpenApiKeyDialog,
                 modifier = Modifier
-                    .size(40.dp)
+                    .size(38.dp)
                     .clip(CircleShape)
                     .background(AmoledSurface)
             ) {
@@ -853,7 +1097,6 @@ private fun ChatMessageItem(
             }
         } else {
             Column(modifier = Modifier.fillMaxWidth()) {
-                // Карточка рассуждений
                 if (message.hasThoughts || message.thoughtText.isNotEmpty() || message.isThinkingActive) {
                     ThinkingAccordionCard(
                         thoughtText = message.thoughtText,
@@ -960,7 +1203,7 @@ private fun ChatMessageItem(
 }
 
 // ====================================================================
-// Thinking Accordion Card (с защитой от сбоев SelectionContainer)
+// Thinking Accordion Card
 // ====================================================================
 
 @Composable
@@ -1047,9 +1290,6 @@ private fun ThinkingAccordionCard(
                     HorizontalDivider(color = ThinkingBorder, thickness = 0.5.dp)
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:
-                    // Во время активного стриминга (isActive == true) НЕ используем SelectionContainer.
-                    // На 120 Гц это предотвращает краш MultiWidgetSelectionDelegate и IndexOutOfBoundsException.
                     if (isActive) {
                         Text(
                             text = thoughtText.ifEmpty { "Анализ контекста и планирование решения..." },

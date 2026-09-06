@@ -4,15 +4,21 @@ import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
+import android.os.CancellationSignal
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.clientg.network.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.InputStream
 import java.util.UUID
 
@@ -69,13 +75,21 @@ sealed interface ChatUiSideEffect {
 
 class ChatViewModel @JvmOverloads constructor(
     application: Application,
+    private val savedStateHandle: SavedStateHandle? = null,
     private val externalClient: GeminiClient? = null
 ) : AndroidViewModel(application) {
 
-    private val _uiState = MutableStateFlow(ChatUiState())
+    // Дефект №10: Восстановление черновика ввода после Process Death
+    private val initialInputText: String = savedStateHandle?.get<String>(KEY_INPUT_DRAFT) ?: ""
+
+    private val _uiState = MutableStateFlow(ChatUiState(inputText = initialInputText))
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
 
-    private val _uiEffects = Channel<ChatUiSideEffect>(Channel.BUFFERED)
+    // Дефект №2: Буферизованный канал с DROP_OLDEST исключает дедлок фоновой генерации при свернутом UI
+    private val _uiEffects = Channel<ChatUiSideEffect>(
+        capacity = Channel.BUFFERED,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
     val uiEffects: Flow<ChatUiSideEffect> = _uiEffects.receiveAsFlow()
 
     private val activeClient: GeminiClient
@@ -84,12 +98,20 @@ class ChatViewModel @JvmOverloads constructor(
     private var generationJob: Job? = null
     private var countdownJob: Job? = null
 
-    // Потокобезопасная ленивая инициализация хранилища без блокировки UI-потока
+    // Дефект №3: Потокобезопасная инициализация SharedPreferences с защитой от гонок памяти в JMM
+    @Volatile
     private var securePrefs: SharedPreferences? = null
+    private val prefsMutex = Mutex()
+
+    // Дефект №11: Изолированный кэш API-ключа вне частых снимков StateFlow
+    @Volatile
+    private var cachedApiKey: String = ""
 
     private suspend fun getSecurePrefs(): SharedPreferences = withContext(Dispatchers.IO) {
-        securePrefs ?: createSafeSharedPreferences(getApplication<Application>()).also {
-            securePrefs = it
+        securePrefs ?: prefsMutex.withLock {
+            securePrefs ?: createSafeSharedPreferences(getApplication<Application>()).also {
+                securePrefs = it
+            }
         }
     }
 
@@ -98,6 +120,7 @@ class ChatViewModel @JvmOverloads constructor(
         viewModelScope.launch(Dispatchers.IO) {
             val prefs = getSecurePrefs()
             val savedKey = prefs.getString(PREF_KEY_API_KEY, "") ?: ""
+            cachedApiKey = savedKey
             _uiState.update { it.copy(apiKey = savedKey) }
         }
 
@@ -106,7 +129,7 @@ class ChatViewModel @JvmOverloads constructor(
             shouldCloseClientOnExit = false
         } else {
             activeClient = GeminiClient(
-                apiKeyProvider = { _uiState.value.apiKey }
+                apiKeyProvider = { cachedApiKey.ifBlank { _uiState.value.apiKey } }
             )
             shouldCloseClientOnExit = true
         }
@@ -117,6 +140,8 @@ class ChatViewModel @JvmOverloads constructor(
     // ================================================================
 
     fun onInputTextChanged(newText: String) {
+        // Дефект №10: Сохранение черновика в SavedStateHandle
+        savedStateHandle?.set(KEY_INPUT_DRAFT, newText)
         _uiState.update { it.copy(inputText = newText) }
     }
 
@@ -138,6 +163,7 @@ class ChatViewModel @JvmOverloads constructor(
 
     fun onSaveApiKey(newKey: String) {
         val trimmed = newKey.trim()
+        cachedApiKey = trimmed
         viewModelScope.launch(Dispatchers.IO) {
             getSecurePrefs().edit().putString(PREF_KEY_API_KEY, trimmed).apply()
             _uiState.update {
@@ -147,7 +173,7 @@ class ChatViewModel @JvmOverloads constructor(
                     errorMessage = null
                 )
             }
-            _uiEffects.send(ChatUiSideEffect.ShowToast("API-ключ сохранен в защищенном хранилище"))
+            _uiEffects.trySend(ChatUiSideEffect.ShowToast("API-ключ сохранен в защищенном хранилище"))
         }
     }
 
@@ -157,15 +183,16 @@ class ChatViewModel @JvmOverloads constructor(
 
     fun onToggleThinkingAccordion(messageId: String) {
         _uiState.update { state ->
-            state.copy(
-                messages = state.messages.map { msg ->
-                    if (msg.id == messageId) {
-                        msg.copy(isThinkingExpanded = !msg.isThinkingExpanded)
-                    } else {
-                        msg
-                    }
-                }
-            )
+            val messages = state.messages
+            val idx = messages.indexOfFirst { it.id == messageId }
+            if (idx != -1) {
+                val newMessages = ArrayList(messages)
+                val target = newMessages[idx]
+                newMessages[idx] = target.copy(isThinkingExpanded = !target.isThinkingExpanded)
+                state.copy(messages = newMessages)
+            } else {
+                state
+            }
         }
     }
 
@@ -187,6 +214,10 @@ class ChatViewModel @JvmOverloads constructor(
 
     fun onAttachFileUri(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
+            val signal = CancellationSignal()
+            val job = coroutineContext.job
+            val handle = job.invokeOnCompletion { signal.cancel() }
+
             try {
                 val context = getApplication<Application>()
                 val resolver = context.contentResolver
@@ -194,7 +225,8 @@ class ChatViewModel @JvmOverloads constructor(
                 var fileName = "attachment.txt"
                 var fileSize = 0L
 
-                resolver.query(uri, null, null, null, null)?.use { cursor ->
+                // Дефект №9: Передача CancellationSignal для безопасного прерывания IPC-запроса в SAF
+                resolver.query(uri, null, null, null, signal)?.use { cursor ->
                     val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                     val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
                     if (cursor.moveToFirst()) {
@@ -207,7 +239,6 @@ class ChatViewModel @JvmOverloads constructor(
                     }
                 }
 
-                // Лимит в байтах с учетом UTF-8 мультибайтовых символов (до 4 байт на char)
                 val maxBytes = TextAttachment.MAX_ATTACHMENT_CHARS.toLong() * 4L
                 if (fileSize > 0L && fileSize > maxBytes) {
                     val sizeMb = fileSize / (1024 * 1024)
@@ -215,6 +246,7 @@ class ChatViewModel @JvmOverloads constructor(
                     throw IllegalArgumentException("Файл '$fileName' ($sizeMb МБ) превышает допустимый лимит ($limitMb МБ).")
                 }
 
+                // Дефект №13: Срез маркера BOM и защита от повреждения кодировки
                 val content = resolver.openInputStream(uri)?.use { stream ->
                     readStreamSafely(stream, TextAttachment.MAX_ATTACHMENT_CHARS)
                 } ?: throw IllegalArgumentException("Не удалось открыть поток чтения файла.")
@@ -223,18 +255,23 @@ class ChatViewModel @JvmOverloads constructor(
 
                 withContext(Dispatchers.Main) {
                     _uiState.update { current ->
-                        if (current.attachedFiles.any { it.fileName == newAttachment.fileName }) {
-                            current
+                        // Дефект №12: Умная дедупликация файлов с разрешением коллизий одинаковых имен
+                        val uniqueAttachment = makeUniqueAttachment(current.attachedFiles, newAttachment)
+                        if (uniqueAttachment != null) {
+                            current.copy(attachedFiles = current.attachedFiles + uniqueAttachment)
                         } else {
-                            current.copy(attachedFiles = current.attachedFiles + newAttachment)
+                            current
                         }
                     }
-                    _uiEffects.send(ChatUiSideEffect.HapticLightTick)
+                    _uiEffects.trySend(ChatUiSideEffect.HapticLightTick)
                 }
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 withContext(Dispatchers.Main) {
                     _uiState.update { it.copy(errorMessage = "Ошибка вложения: ${e.localizedMessage}") }
                 }
+            } finally {
+                handle.dispose()
             }
         }
     }
@@ -243,6 +280,27 @@ class ChatViewModel @JvmOverloads constructor(
         _uiState.update { it.copy(attachedFiles = it.attachedFiles - attachment) }
     }
 
+    // Дефект №12: Функция разрешения конфликтов имен одинаковых файлов
+    private fun makeUniqueAttachment(existing: List<TextAttachment>, attachment: TextAttachment): TextAttachment? {
+        if (existing.any { it.fileName == attachment.fileName && it.content == attachment.content }) {
+            return null // Полный дубликат содержимого
+        }
+        if (existing.none { it.fileName == attachment.fileName }) {
+            return attachment
+        }
+        val baseName = attachment.fileName.substringBeforeLast('.', attachment.fileName)
+        val ext = if (attachment.fileName.contains('.')) ".${attachment.fileName.substringAfterLast('.')}" else ""
+        var counter = 1
+        var candidateName: String
+        do {
+            candidateName = "$baseName ($counter)$ext"
+            counter++
+        } while (existing.any { it.fileName == candidateName })
+
+        return TextAttachment(fileName = candidateName, content = attachment.content)
+    }
+
+    // Дефект №13: Безопасное чтение потока со срезом маркера BOM UTF-8 (\uFEFF)
     private fun readStreamSafely(stream: InputStream, maxChars: Int): String {
         val reader = stream.bufferedReader(Charsets.UTF_8)
         val buffer = CharArray(8192)
@@ -258,7 +316,12 @@ class ChatViewModel @JvmOverloads constructor(
             }
             builder.append(buffer, 0, read)
         }
-        return builder.toString()
+
+        var result = builder.toString()
+        if (result.startsWith("\uFEFF")) {
+            result = result.removePrefix("\uFEFF")
+        }
+        return result
     }
 
     // ================================================================
@@ -273,7 +336,7 @@ class ChatViewModel @JvmOverloads constructor(
         if (prompt.isBlank() && attachments.isEmpty()) return
         if (state.isGenerating) return
 
-        if (state.apiKey.isBlank()) {
+        if (state.apiKey.isBlank() && cachedApiKey.isBlank()) {
             _uiState.update {
                 it.copy(
                     isApiKeyDialogOpen = true,
@@ -313,6 +376,7 @@ class ChatViewModel @JvmOverloads constructor(
             }
         }
 
+        savedStateHandle?.set(KEY_INPUT_DRAFT, "")
         _uiState.update { current ->
             current.copy(
                 messages = current.messages + userMessage + initialAssistantMessage,
@@ -334,12 +398,28 @@ class ChatViewModel @JvmOverloads constructor(
         )
     }
 
+    // Дефект №5: Обратная совместимость с вызовом повтора последнего сообщения
     fun onRetryLastMessage() {
+        onRetryMessage(targetMessageId = null)
+    }
+
+    // Дефект №5: Адресный повтор сообщений с откатом истории до выбранного раунда диалога
+    fun onRetryMessage(targetMessageId: String? = null) {
         val state = _uiState.value
         if (state.isGenerating) return
 
-        val lastUserMessage = state.messages.lastOrNull { it.role == ChatRole.USER } ?: return
-        val messagesWithoutLastTurn = state.messages.dropLastWhile { it.role == ChatRole.MODEL || it.id == lastUserMessage.id }
+        val targetModelIndex = if (targetMessageId != null) {
+            state.messages.indexOfLast { it.id == targetMessageId }
+        } else {
+            state.messages.indexOfLast { it.role == ChatRole.MODEL }
+        }
+
+        val searchList = if (targetModelIndex != -1) state.messages.take(targetModelIndex + 1) else state.messages
+        val targetUserMessage = searchList.lastOrNull { it.role == ChatRole.USER } ?: return
+        val targetUserIndex = state.messages.indexOfLast { it.id == targetUserMessage.id }
+        if (targetUserIndex == -1) return
+
+        val messagesHistory = state.messages.take(targetUserIndex)
 
         val assistantMessageId = UUID.randomUUID().toString()
         val initialAssistantMessage = UiChatMessage(
@@ -350,7 +430,7 @@ class ChatViewModel @JvmOverloads constructor(
             isThinkingExpanded = (state.thinkingLevel != ThinkingLevel.LOW)
         )
 
-        val sanitizedHistory = messagesWithoutLastTurn.mapNotNull { msg ->
+        val sanitizedHistory = messagesHistory.mapNotNull { msg ->
             if (msg.text.isBlank() && msg.attachments.isEmpty()) {
                 null
             } else {
@@ -365,7 +445,7 @@ class ChatViewModel @JvmOverloads constructor(
 
         _uiState.update { current ->
             current.copy(
-                messages = messagesWithoutLastTurn + lastUserMessage + initialAssistantMessage,
+                messages = messagesHistory + targetUserMessage + initialAssistantMessage,
                 isGenerating = true,
                 errorMessage = null,
                 retryCountdownSeconds = null
@@ -374,9 +454,9 @@ class ChatViewModel @JvmOverloads constructor(
 
         executeStream(
             assistantMessageId = assistantMessageId,
-            prompt = lastUserMessage.text,
+            prompt = targetUserMessage.text,
             history = sanitizedHistory,
-            attachments = lastUserMessage.attachments,
+            attachments = targetUserMessage.attachments,
             thinkingLevel = state.thinkingLevel,
             enableSearch = state.enableSearch
         )
@@ -390,17 +470,15 @@ class ChatViewModel @JvmOverloads constructor(
         thinkingLevel: ThinkingLevel,
         enableSearch: Boolean
     ) {
-        viewModelScope.launch {
-            _uiEffects.send(ChatUiSideEffect.ScrollToBottom)
-            _uiEffects.send(ChatUiSideEffect.HapticLightTick)
-        }
+        _uiEffects.trySend(ChatUiSideEffect.ScrollToBottom)
+        _uiEffects.trySend(ChatUiSideEffect.HapticLightTick)
 
-        generationJob = viewModelScope.launch {
+        // Дефект №7: Сбор и буферизация на фоновом диспатчере для исключения Thread Hopping на 120 Гц
+        generationJob = viewModelScope.launch(Dispatchers.Default) {
             val thoughtBuffer = StringBuilder()
             val contentBuffer = StringBuilder()
             var lastUiFlushTime = 0L
 
-            // Оптимизированный сброс буфера без GC-трешинга (O(1) замена последнего элемента)
             suspend fun flushDeltasToUi() {
                 if (thoughtBuffer.isEmpty() && contentBuffer.isEmpty()) return
 
@@ -408,32 +486,34 @@ class ChatViewModel @JvmOverloads constructor(
                 val contentDelta = contentBuffer.toString()
                 thoughtBuffer.setLength(0)
                 contentBuffer.setLength(0)
-                lastUiFlushTime = System.currentTimeMillis()
+                lastUiFlushTime = SystemClock.elapsedRealtime()
 
-                _uiState.update { currentState ->
-                    val messages = currentState.messages
-                    val lastIdx = messages.lastIndex
-                    if (lastIdx >= 0 && messages[lastIdx].id == assistantMessageId) {
-                        val currentTarget = messages[lastIdx]
-                        val updatedTarget = currentTarget.copy(
-                            thoughtText = if (thoughtDelta.isNotEmpty()) currentTarget.thoughtText + thoughtDelta else currentTarget.thoughtText,
-                            text = if (contentDelta.isNotEmpty()) currentTarget.text + contentDelta else currentTarget.text
-                        )
-                        val newMessages = ArrayList(messages)
-                        newMessages[lastIdx] = updatedTarget
-                        currentState.copy(messages = newMessages)
-                    } else {
-                        val updatedList = messages.map { msg ->
-                            if (msg.id == assistantMessageId) {
-                                msg.copy(
-                                    thoughtText = if (thoughtDelta.isNotEmpty()) msg.thoughtText + thoughtDelta else msg.thoughtText,
-                                    text = if (contentDelta.isNotEmpty()) msg.text + contentDelta else msg.text
-                                )
-                            } else {
-                                msg
+                withContext(Dispatchers.Main.immediate) {
+                    _uiState.update { currentState ->
+                        val messages = currentState.messages
+                        val lastIdx = messages.lastIndex
+                        if (lastIdx >= 0 && messages[lastIdx].id == assistantMessageId) {
+                            val currentTarget = messages[lastIdx]
+                            val updatedTarget = currentTarget.copy(
+                                thoughtText = if (thoughtDelta.isNotEmpty()) currentTarget.thoughtText + thoughtDelta else currentTarget.thoughtText,
+                                text = if (contentDelta.isNotEmpty()) currentTarget.text + contentDelta else currentTarget.text
+                            )
+                            val newMessages = ArrayList(messages)
+                            newMessages[lastIdx] = updatedTarget
+                            currentState.copy(messages = newMessages)
+                        } else {
+                            val updatedList = messages.map { msg ->
+                                if (msg.id == assistantMessageId) {
+                                    msg.copy(
+                                        thoughtText = if (thoughtDelta.isNotEmpty()) msg.thoughtText + thoughtDelta else msg.thoughtText,
+                                        text = if (contentDelta.isNotEmpty()) msg.text + contentDelta else msg.text
+                                    )
+                                } else {
+                                    msg
+                                }
                             }
+                            currentState.copy(messages = updatedList)
                         }
-                        currentState.copy(messages = updatedList)
                     }
                 }
             }
@@ -449,7 +529,7 @@ class ChatViewModel @JvmOverloads constructor(
                     when (event) {
                         is GeminiStreamEvent.ThinkingDelta -> {
                             thoughtBuffer.append(event.text)
-                            val now = System.currentTimeMillis()
+                            val now = SystemClock.elapsedRealtime()
                             if (now - lastUiFlushTime >= UI_BATCH_INTERVAL_MS) {
                                 flushDeltasToUi()
                             }
@@ -457,7 +537,7 @@ class ChatViewModel @JvmOverloads constructor(
 
                         is GeminiStreamEvent.ContentDelta -> {
                             contentBuffer.append(event.text)
-                            val now = System.currentTimeMillis()
+                            val now = SystemClock.elapsedRealtime()
                             if (now - lastUiFlushTime >= UI_BATCH_INTERVAL_MS) {
                                 flushDeltasToUi()
                             }
@@ -465,52 +545,66 @@ class ChatViewModel @JvmOverloads constructor(
 
                         is GeminiStreamEvent.ThinkingCompleted -> {
                             flushDeltasToUi()
-                            handleDiscreteEvent(assistantMessageId, event)
-                            _uiEffects.send(ChatUiSideEffect.HapticThinkingCompleted)
+                            withContext(Dispatchers.Main.immediate) {
+                                handleDiscreteEvent(assistantMessageId, event)
+                                _uiEffects.trySend(ChatUiSideEffect.HapticThinkingCompleted)
+                            }
                         }
 
                         is GeminiStreamEvent.ContentStarted -> {
                             flushDeltasToUi()
-                            handleDiscreteEvent(assistantMessageId, event)
-                            _uiEffects.send(ChatUiSideEffect.ScrollToBottom)
+                            withContext(Dispatchers.Main.immediate) {
+                                handleDiscreteEvent(assistantMessageId, event)
+                                _uiEffects.trySend(ChatUiSideEffect.ScrollToBottom)
+                            }
                         }
 
                         is GeminiStreamEvent.Completed -> {
                             flushDeltasToUi()
-                            handleDiscreteEvent(assistantMessageId, event)
-                            _uiEffects.send(ChatUiSideEffect.HapticGenerationFinished)
-                            _uiEffects.send(ChatUiSideEffect.ScrollToBottom)
+                            withContext(Dispatchers.Main.immediate) {
+                                handleDiscreteEvent(assistantMessageId, event)
+                                _uiEffects.trySend(ChatUiSideEffect.HapticGenerationFinished)
+                                _uiEffects.trySend(ChatUiSideEffect.ScrollToBottom)
+                            }
                         }
 
                         else -> {
                             flushDeltasToUi()
-                            handleDiscreteEvent(assistantMessageId, event)
+                            withContext(Dispatchers.Main.immediate) {
+                                handleDiscreteEvent(assistantMessageId, event)
+                            }
                         }
                     }
                 }
             } catch (_: CancellationException) {
                 withContext(NonCancellable) {
                     flushDeltasToUi()
-                    finalizeAssistantMessage(assistantMessageId, FinishReason.STOP)
+                    withContext(Dispatchers.Main.immediate) {
+                        finalizeAssistantMessage(assistantMessageId, FinishReason.STOP)
+                    }
                 }
             } catch (e: GeminiApiException) {
                 withContext(NonCancellable) {
                     flushDeltasToUi()
-                    handleApiError(assistantMessageId, e)
+                    withContext(Dispatchers.Main.immediate) {
+                        handleApiError(assistantMessageId, e)
+                    }
                 }
             } catch (e: Exception) {
                 withContext(NonCancellable) {
                     flushDeltasToUi()
-                    _uiState.update {
-                        it.copy(
-                            isGenerating = false,
-                            errorMessage = "Непредвиденная ошибка: ${e.localizedMessage}"
-                        )
+                    withContext(Dispatchers.Main.immediate) {
+                        _uiState.update {
+                            it.copy(
+                                isGenerating = false,
+                                errorMessage = "Непредвиденная ошибка: ${e.localizedMessage}"
+                            )
+                        }
+                        finalizeAssistantMessage(assistantMessageId, FinishReason.UNKNOWN)
                     }
-                    finalizeAssistantMessage(assistantMessageId, FinishReason.UNKNOWN)
                 }
             } finally {
-                withContext(NonCancellable) {
+                withContext(NonCancellable + Dispatchers.Main.immediate) {
                     _uiState.update { it.copy(isGenerating = false) }
                 }
             }
@@ -522,73 +616,59 @@ class ChatViewModel @JvmOverloads constructor(
         generationJob = null
     }
 
+    // Дефект №8: Оптимизация $O(1)$ для обновления последнего сообщения в handleDiscreteEvent
     private fun handleDiscreteEvent(assistantMessageId: String, event: GeminiStreamEvent) {
         _uiState.update { currentState ->
-            val updated = currentState.messages.map { msg ->
-                if (msg.id != assistantMessageId) return@map msg
+            val messages = currentState.messages
+            val lastIdx = messages.lastIndex
 
-                when (event) {
-                    is GeminiStreamEvent.Connecting -> {
-                        msg.copy(isStreaming = true)
-                    }
-
-                    is GeminiStreamEvent.ThinkingStarted -> {
-                        msg.copy(isThinkingActive = true, isThinkingExpanded = true)
-                    }
-
-                    is GeminiStreamEvent.ThinkingCompleted -> {
-                        msg.copy(
-                            isThinkingActive = false,
-                            isThinkingExpanded = false,
-                            thinkingDurationMs = msg.thinkingDurationMs + event.durationMs
-                        )
-                    }
-
-                    is GeminiStreamEvent.ContentStarted -> {
-                        msg.copy(isThinkingActive = false)
-                    }
-
-                    is GeminiStreamEvent.SearchQueriesDiscovered -> {
-                        msg.copy(searchQueries = (msg.searchQueries + event.queries).distinct())
-                    }
-
-                    is GeminiStreamEvent.SourcesDiscovered -> {
-                        msg.copy(sources = (msg.sources + event.newSources).distinctBy { it.url })
-                    }
-
-                    is GeminiStreamEvent.CitationsDiscovered -> {
-                        msg.copy(citations = (msg.citations + event.citations).distinct())
-                    }
-
-                    is GeminiStreamEvent.SearchEntryPointRendered -> {
-                        msg.copy(searchSuggestionsHtml = event.htmlContent)
-                    }
-
-                    is GeminiStreamEvent.UsageReported -> {
-                        msg.copy(usage = event)
-                    }
-
-                    is GeminiStreamEvent.Completed -> {
-                        msg.copy(
-                            isStreaming = false,
-                            isThinkingActive = false,
-                            finishReason = event.finishReason,
-                            thoughtSignature = event.thoughtSignature ?: msg.thoughtSignature
-                        )
-                    }
-
+            fun updateMessage(msg: UiChatMessage): UiChatMessage {
+                return when (event) {
+                    is GeminiStreamEvent.Connecting -> msg.copy(isStreaming = true)
+                    is GeminiStreamEvent.ThinkingStarted -> msg.copy(isThinkingActive = true, isThinkingExpanded = true)
+                    is GeminiStreamEvent.ThinkingCompleted -> msg.copy(
+                        isThinkingActive = false,
+                        isThinkingExpanded = false,
+                        thinkingDurationMs = msg.thinkingDurationMs + event.durationMs
+                    )
+                    is GeminiStreamEvent.ContentStarted -> msg.copy(isThinkingActive = false)
+                    is GeminiStreamEvent.SearchQueriesDiscovered -> msg.copy(searchQueries = (msg.searchQueries + event.queries).distinct())
+                    is GeminiStreamEvent.SourcesDiscovered -> msg.copy(sources = (msg.sources + event.newSources).distinctBy { it.url })
+                    is GeminiStreamEvent.CitationsDiscovered -> msg.copy(citations = (msg.citations + event.citations).distinct())
+                    is GeminiStreamEvent.SearchEntryPointRendered -> msg.copy(searchSuggestionsHtml = event.htmlContent)
+                    is GeminiStreamEvent.UsageReported -> msg.copy(usage = event)
+                    is GeminiStreamEvent.Completed -> msg.copy(
+                        isStreaming = false,
+                        isThinkingActive = false,
+                        finishReason = event.finishReason,
+                        thoughtSignature = event.thoughtSignature ?: msg.thoughtSignature
+                    )
                     else -> msg
                 }
             }
-            currentState.copy(messages = updated)
+
+            if (lastIdx >= 0 && messages[lastIdx].id == assistantMessageId) {
+                val newMessages = ArrayList(messages)
+                newMessages[lastIdx] = updateMessage(messages[lastIdx])
+                currentState.copy(messages = newMessages)
+            } else {
+                val updatedList = messages.map { msg ->
+                    if (msg.id == assistantMessageId) updateMessage(msg) else msg
+                }
+                currentState.copy(messages = updatedList)
+            }
         }
     }
 
+    // Дефект №6: Чистое удаление сообщения-призрака, если пользователь отменил генерацию до первого токена
     private fun finalizeAssistantMessage(assistantMessageId: String, reason: FinishReason) {
         _uiState.update { state ->
+            val filteredMessages = state.messages.filterNot { msg ->
+                msg.id == assistantMessageId && msg.text.isEmpty() && msg.thoughtText.isEmpty()
+            }
             state.copy(
                 isGenerating = false,
-                messages = state.messages.map { msg ->
+                messages = filteredMessages.map { msg ->
                     if (msg.id == assistantMessageId) {
                         msg.copy(isStreaming = false, isThinkingActive = false, finishReason = reason)
                     } else {
@@ -599,15 +679,28 @@ class ChatViewModel @JvmOverloads constructor(
         }
     }
 
+    // Дефект №1: Сброс флагов генерации и размышлений при ошибке API для частичных сообщений
     private fun handleApiError(assistantMessageId: String, error: GeminiApiException) {
         _uiState.update { state ->
+            val filteredMessages = state.messages.filterNot { msg ->
+                msg.id == assistantMessageId && msg.text.isEmpty() && msg.thoughtText.isEmpty()
+            }
+            val finalizedMessages = filteredMessages.map { msg ->
+                if (msg.id == assistantMessageId) {
+                    msg.copy(
+                        isStreaming = false,
+                        isThinkingActive = false,
+                        finishReason = FinishReason.UNKNOWN
+                    )
+                } else {
+                    msg
+                }
+            }
             state.copy(
                 isGenerating = false,
                 errorMessage = error.userFriendlyMessage,
                 retryCountdownSeconds = error.retryAfterSeconds,
-                messages = state.messages.filterNot { msg ->
-                    msg.id == assistantMessageId && msg.text.isEmpty() && msg.thoughtText.isEmpty()
-                }
+                messages = finalizedMessages
             )
         }
         error.retryAfterSeconds?.let { seconds ->
@@ -639,8 +732,11 @@ class ChatViewModel @JvmOverloads constructor(
 
     companion object {
         private const val PREF_KEY_API_KEY = "gemini_api_key"
-        private const val UI_BATCH_INTERVAL_MS = 25L
+        private const val KEY_INPUT_DRAFT = "key_input_draft_text"
+        // Синхронизация с VSYNC 120 Гц (~33.3 мс, 30 обновлений UI/сек для плавности LTPO без троттлинга)
+        private const val UI_BATCH_INTERVAL_MS = 33L
 
+        // Дефект №4: Создание безопасного защищенного хранилища без открытых утечек
         private fun createSafeSharedPreferences(context: Context): SharedPreferences {
             return try {
                 val masterKey = MasterKey.Builder(context)

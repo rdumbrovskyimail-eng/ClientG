@@ -216,7 +216,6 @@ fun ChatGptScreen(
     val coroutineScope = rememberCoroutineScope()
     var showClearChatDialog by remember { mutableStateOf(false) }
 
-    // Защита от засыпания экрана во время генерации (Первоисточник 41)
     val currentView = LocalView.current
     DisposableEffect(uiState.isGenerating) {
         currentView.keepScreenOn = uiState.isGenerating
@@ -225,7 +224,6 @@ fun ChatGptScreen(
         }
     }
 
-    // Умный автоскролл (Первоисточники 9 и 40): примагничивает только если пользователь у дна
     val isAtBottom by remember {
         derivedStateOf {
             val layoutInfo = listState.layoutInfo
@@ -236,8 +234,12 @@ fun ChatGptScreen(
         }
     }
 
+    // ТРОТТЛИНГ АВТОСКРОЛЛА: автоскролл вызывается квантованными порциями, а не на каждом символе
     val lastMessage = uiState.messages.lastOrNull()
-    LaunchedEffect(lastMessage?.text?.length, lastMessage?.thoughtText?.length) {
+    val textBucket = (lastMessage?.text?.length ?: 0) / 32
+    val thoughtBucket = (lastMessage?.thoughtText?.length ?: 0) / 48
+
+    LaunchedEffect(textBucket, thoughtBucket) {
         if (lastMessage?.isStreaming == true && isAtBottom && uiState.messages.isNotEmpty()) {
             listState.scrollToItem(uiState.messages.lastIndex)
         }
@@ -286,7 +288,6 @@ fun ChatGptScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            // Безопасная обработка выреза фронтальной камеры и клавиатуры (Первоисточник 42)
             .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top))
             .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
     ) {
@@ -543,7 +544,7 @@ private fun EmptyStateHero(
 }
 
 // ====================================================================
-// Верхняя панель (Top Bar) с селектором уровня рассуждений
+// Верхняя панель (Top Bar)
 // ====================================================================
 
 @Composable
@@ -852,7 +853,7 @@ private fun ChatMessageItem(
             }
         } else {
             Column(modifier = Modifier.fillMaxWidth()) {
-                // Карточка рассуждений: постоянный якорь через hasThoughts (Первоисточник 8)
+                // Карточка рассуждений
                 if (message.hasThoughts || message.thoughtText.isNotEmpty() || message.isThinkingActive) {
                     ThinkingAccordionCard(
                         thoughtText = message.thoughtText,
@@ -876,14 +877,12 @@ private fun ChatMessageItem(
 
                 if (message.text.isNotEmpty()) {
                     if (message.isStreaming) {
-                        // Во время стриминга рендерим без SelectionContainer, чтобы избежать IndexOutOfBoundsException
                         StreamingMarkdownContent(
                             text = message.text,
                             citations = message.citations,
                             onOpenUrl = onOpenUrl
                         )
                     } else {
-                        // После завершения генерации включаем полноценное выделение и копирование
                         SelectionContainer {
                             StreamingMarkdownContent(
                                 text = message.text,
@@ -961,7 +960,7 @@ private fun ChatMessageItem(
 }
 
 // ====================================================================
-// Неисчезающий Thinking Accordion
+// Thinking Accordion Card (с защитой от сбоев SelectionContainer)
 // ====================================================================
 
 @Composable
@@ -1047,7 +1046,11 @@ private fun ThinkingAccordionCard(
                 Column(modifier = Modifier.padding(top = 10.dp)) {
                     HorizontalDivider(color = ThinkingBorder, thickness = 0.5.dp)
                     Spacer(modifier = Modifier.height(8.dp))
-                    SelectionContainer {
+
+                    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:
+                    // Во время активного стриминга (isActive == true) НЕ используем SelectionContainer.
+                    // На 120 Гц это предотвращает краш MultiWidgetSelectionDelegate и IndexOutOfBoundsException.
+                    if (isActive) {
                         Text(
                             text = thoughtText.ifEmpty { "Анализ контекста и планирование решения..." },
                             color = Color(0xFFB0B0B0),
@@ -1056,6 +1059,17 @@ private fun ThinkingAccordionCard(
                             fontFamily = FontFamily.Monospace,
                             style = DefaultTextStyle
                         )
+                    } else {
+                        SelectionContainer {
+                            Text(
+                                text = thoughtText.ifEmpty { "Анализ контекста и планирование решения..." },
+                                color = Color(0xFFB0B0B0),
+                                fontSize = 12.sp,
+                                lineHeight = 18.sp,
+                                fontFamily = FontFamily.Monospace,
+                                style = DefaultTextStyle
+                            )
+                        }
                     }
                 }
             }
@@ -1279,7 +1293,6 @@ fun ChatGptInputBar(
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.Bottom
     ) {
-        // Кнопка вложений (+)
         Box(
             modifier = Modifier
                 .size(40.dp)
@@ -1298,7 +1311,6 @@ fun ChatGptInputBar(
 
         Spacer(modifier = Modifier.width(4.dp))
 
-        // Кнопка поиска Google Search
         Box(
             modifier = Modifier
                 .size(40.dp)
@@ -1326,7 +1338,6 @@ fun ChatGptInputBar(
 
         Spacer(modifier = Modifier.width(4.dp))
 
-        // Кнопка селектора уровня рассуждений (LOW / MED / HIGH)
         Box {
             Box(
                 modifier = Modifier
@@ -1427,7 +1438,6 @@ fun ChatGptInputBar(
 
         Spacer(modifier = Modifier.width(6.dp))
 
-        // Поле ввода с поддержкой физических клавиатур (Key.Enter / NumPadEnter)
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -1491,7 +1501,6 @@ fun ChatGptInputBar(
 
         Spacer(modifier = Modifier.width(8.dp))
 
-        // Кнопка Отправки / Остановки
         Box(
             modifier = Modifier
                 .size(40.dp)

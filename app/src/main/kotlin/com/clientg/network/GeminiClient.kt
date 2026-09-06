@@ -34,20 +34,23 @@ import kotlin.coroutines.CoroutineContext
 import kotlin.math.ceil
 
 // ====================================================================
-// 1. Доменные контракты (Domain Contracts)
+// 1. Доменные контракты (Сериализуемые для сохранения в сессиях)
 // ====================================================================
 
+@Serializable
 enum class ThinkingLevel(val apiValue: String) {
     LOW("LOW"),
     MEDIUM("MEDIUM"),
     HIGH("HIGH")
 }
 
+@Serializable
 enum class ChatRole(val apiValue: String) {
     USER("user"),
     MODEL("model")
 }
 
+@Serializable
 data class ChatMessage(
     val role: ChatRole,
     val text: String,
@@ -55,6 +58,7 @@ data class ChatMessage(
     val thoughtSignature: String? = null
 )
 
+@Serializable
 data class TextAttachment(
     val fileName: String,
     val content: String,
@@ -74,17 +78,20 @@ data class TextAttachment(
     }
 }
 
+@Serializable
 data class GroundingSource(
     val title: String,
     val url: String
 )
 
+@Serializable
 data class InlineCitation(
     val startIndex: Int,
     val endIndex: Int,
     val source: GroundingSource
 )
 
+@Serializable
 enum class FinishReason {
     STOP,
     MAX_TOKENS,
@@ -114,6 +121,7 @@ sealed interface GeminiStreamEvent {
     data class CitationsDiscovered(val citations: List<InlineCitation>) : GeminiStreamEvent
     data class SearchEntryPointRendered(val htmlContent: String) : GeminiStreamEvent
 
+    @Serializable
     data class UsageReported(
         val promptTokens: Int,
         val candidateTokens: Int,
@@ -143,11 +151,25 @@ class GeminiApiException(
 
 @Serializable
 internal data class GeminiWireRequest(
+    @SerialName("cachedContent") val cachedContent: String? = null,
     @SerialName("systemInstruction") val systemInstruction: SystemInstructionDto? = null,
     val contents: List<ContentDto>,
     @SerialName("generationConfig") val generationConfig: GenerationConfigDto,
     val tools: List<ToolDto>? = null,
     val safetySettings: List<SafetySettingDto>
+)
+
+@Serializable
+internal data class CreateCachedContentRequest(
+    val model: String,
+    val contents: List<ContentDto>,
+    val ttl: String = "7200s" // Гарантированная фиксация в памяти TPU на 2 часа
+)
+
+@Serializable
+internal data class CachedContentResponse(
+    val name: String,
+    val expireTime: String? = null
 )
 
 @Serializable
@@ -329,11 +351,10 @@ class GeminiClient(
 ) : Closeable {
 
     companion object {
-        private const val BASE_URL = "https://aiplatform.googleapis.com/v1/publishers/google/models"
+        private const val BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
         private const val DEFAULT_MODEL_NAME = "gemini-3.8-flash"
         private const val ANDROID_NET_TAG = 0x0000FA01
 
-        // 90 секунд: безопасный запас времени для фазы рассуждений и веб-поиска на уровне HIGH
         private const val SSE_IDLE_TIMEOUT_MS = 90_000L
 
         const val IMMUTABLE_SYSTEM_INSTRUCTION =
@@ -344,9 +365,9 @@ class GeminiClient(
 
         fun createDefaultHttpClient(): HttpClient = HttpClient(CIO) {
             engine {
-                maxConnectionsCount = 32
+                maxConnectionsCount = 64
                 endpoint {
-                    maxConnectionsPerRoute = 8
+                    maxConnectionsPerRoute = 32
                     pipelineMaxSize = 1
                     keepAliveTime = 120_000
                     connectTimeout = 30_000
@@ -355,7 +376,6 @@ class GeminiClient(
 
             install(HttpTimeout) {
                 requestTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
-                // 180 секунд сокетного тайм-аута для длинных цепочек генерации кода и рассуждений
                 socketTimeoutMillis = 180_000L
                 connectTimeoutMillis = 30_000L
             }
@@ -449,18 +469,135 @@ class GeminiClient(
         coerceInputValues = true
     }
 
+    /**
+     * Аппаратная фиксация тяжелых вложений в кэше TPU Google на 2 часа (7200 сек).
+     * Защищает от повторного списания 100k-140k токенов при любых сетевых сбоях.
+     */
+    suspend fun pinExplicitContextCache(
+        attachments: List<TextAttachment>,
+        modelName: String = DEFAULT_MODEL_NAME,
+        ttlSeconds: Long = 7200L
+    ): String = withContext(Dispatchers.IO) {
+        val apiKey = apiKeyProvider().trim()
+        if (apiKey.isBlank()) {
+            throw GeminiApiException(
+                httpStatusCode = HttpStatusCode.Unauthorized,
+                googleErrorCode = "API_KEY_EMPTY",
+                userFriendlyMessage = "API-ключ не задан для создания явного кэша."
+            )
+        }
+
+        val endpoint = "$BASE_URL/cachedContents?key=$apiKey"
+        val cacheParts = attachments.map { att ->
+            val safeName = escapeXmlAttribute(att.fileName)
+            val safeContent = escapeXmlText(att.content)
+            PartDto(text = "<attachment name=\"$safeName\">\n$safeContent\n</attachment>")
+        }
+
+        val requestPayload = CreateCachedContentRequest(
+            model = "models/$modelName",
+            contents = listOf(ContentDto(role = "user", parts = cacheParts)),
+            ttl = "${ttlSeconds}s"
+        )
+
+        AppLogger.i(AppLogger.TAG_NET, "pinExplicitContextCache: Отправка ${attachments.size} вложений в TPU кэш Google...")
+
+        val response = httpClient.post(endpoint) {
+            contentType(ContentType.Application.Json)
+            setBody(json.encodeToString(CreateCachedContentRequest.serializer(), requestPayload))
+        }
+
+        if (!response.status.isSuccess()) {
+            val errBody = response.bodyAsText()
+            AppLogger.e(AppLogger.TAG_NET, "pinExplicitContextCache: Ошибка создания кэша: $errBody")
+            throw GeminiApiException(
+                httpStatusCode = response.status,
+                googleErrorCode = "CACHE_CREATION_FAILED",
+                userFriendlyMessage = "Не удалось зафиксировать кэш в Google (${response.status.value})."
+            )
+        }
+
+        val parsedResponse = json.decodeFromString(CachedContentResponse.serializer(), response.bodyAsText())
+        AppLogger.i(AppLogger.TAG_NET, "pinExplicitContextCache: Кэш успешно зафиксирован! ID = ${parsedResponse.name}")
+        parsedResponse.name
+    }
+
+    /**
+     * Удаление явного кэша при очистке диалога для освобождения квот.
+     */
+    suspend fun deleteExplicitCache(cachedContentId: String) = withContext(Dispatchers.IO) {
+        val apiKey = apiKeyProvider().trim()
+        if (apiKey.isBlank() || cachedContentId.isBlank()) return@withContext
+
+        val endpoint = "$BASE_URL/$cachedContentId?key=$apiKey"
+        runCatching {
+            httpClient.delete(endpoint)
+            AppLogger.d(AppLogger.TAG_NET, "deleteExplicitCache: Кэш $cachedContentId удален из Google.")
+        }.onFailure {
+            AppLogger.w(AppLogger.TAG_NET, "deleteExplicitCache: Не удалось удалить кэш $cachedContentId: ${it.message}")
+        }
+    }
+
+    /**
+     * Потоковая генерация ответа с поддержкой явного кэша и самоисцелением при истечении TTL (404).
+     */
     fun streamContent(
         prompt: String,
         history: List<ChatMessage> = emptyList(),
         attachments: List<TextAttachment> = emptyList(),
+        cachedContentId: String? = null,
+        onCacheExpired: (suspend () -> String?)? = null,
         thinkingLevel: ThinkingLevel = ThinkingLevel.MEDIUM,
         enableSearch: Boolean = false,
         modelName: String = DEFAULT_MODEL_NAME,
         systemInstruction: String = IMMUTABLE_SYSTEM_INSTRUCTION
     ): Flow<GeminiStreamEvent> = flow {
+        var currentCacheId = cachedContentId
+        var cacheRetried = false
+
+        while (true) {
+            try {
+                executeStreamInternal(
+                    prompt = prompt,
+                    history = history,
+                    attachments = attachments,
+                    cachedContentId = currentCacheId,
+                    thinkingLevel = thinkingLevel,
+                    enableSearch = enableSearch,
+                    modelName = modelName,
+                    systemInstruction = systemInstruction,
+                    collector = { emit(it) }
+                )
+                break // Запрос успешно завершен
+            } catch (e: GeminiApiException) {
+                // САМОИСЦЕЛЕНИЕ: Если Google вернул 404 (кэш просрочен по истечении 2 часов)
+                if (e.httpStatusCode == HttpStatusCode.NotFound && currentCacheId != null && !cacheRetried && onCacheExpired != null) {
+                    AppLogger.w(AppLogger.TAG_NET, "streamContent: Кэш $currentCacheId просрочен (404). Авто-перевыпуск кэша...")
+                    val refreshedCacheId = onCacheExpired()
+                    if (refreshedCacheId != null) {
+                        currentCacheId = refreshedCacheId
+                        cacheRetried = true
+                        continue // Повторяем вызов с новым валидным ID кэша без списания токенов!
+                    }
+                }
+                throw e
+            }
+        }
+    }.flowOn(Dispatchers.IO + TrafficStatsElement(ANDROID_NET_TAG))
+
+    private suspend fun executeStreamInternal(
+        prompt: String,
+        history: List<ChatMessage>,
+        attachments: List<TextAttachment>,
+        cachedContentId: String?,
+        thinkingLevel: ThinkingLevel,
+        enableSearch: Boolean,
+        modelName: String,
+        systemInstruction: String,
+        collector: suspend (GeminiStreamEvent) -> Unit
+    ) {
         val apiKey = apiKeyProvider().trim()
         if (apiKey.isBlank()) {
-            AppLogger.e(AppLogger.TAG_NET, "streamContent: Ошибка - API-ключ Gemini пуст!")
             throw GeminiApiException(
                 httpStatusCode = HttpStatusCode.Unauthorized,
                 googleErrorCode = "API_KEY_EMPTY",
@@ -468,33 +605,23 @@ class GeminiClient(
             )
         }
 
-        AppLogger.i(
-            AppLogger.TAG_NET,
-            "streamContent: Старт запроса к модели '$modelName' [Thinking=$thinkingLevel, Search=$enableSearch, History=${history.size} реплик, Вложений=${attachments.size}]"
-        )
-
-        emit(GeminiStreamEvent.Connecting)
+        collector(GeminiStreamEvent.Connecting)
         val startTime = SystemClock.elapsedRealtime()
-        val endpointUrl = "$BASE_URL/$modelName:streamGenerateContent?key=$apiKey&alt=sse"
+        val endpointUrl = "$BASE_URL/models/$modelName:streamGenerateContent?key=$apiKey&alt=sse"
 
-        // 1. Формирование валидной истории диалога (исключаем пустые ходы модели без текста)
+        // 1. Формирование истории. Если кэш активен, вложения НЕ дублируются по сети!
         val rawTurns = ArrayList<ContentDto>(history.size + 1)
         for (msg in history) {
             val historyParts = buildList {
-                msg.attachments.forEach { att ->
-                    val safeName = escapeXmlAttribute(att.fileName)
-                    val safeContent = escapeXmlText(att.content)
-                    add(PartDto(text = "<attachment name=\"$safeName\">\n$safeContent\n</attachment>"))
+                if (cachedContentId == null) {
+                    msg.attachments.forEach { att ->
+                        val safeName = escapeXmlAttribute(att.fileName)
+                        val safeContent = escapeXmlText(att.content)
+                        add(PartDto(text = "<attachment name=\"$safeName\">\n$safeContent\n</attachment>"))
+                    }
                 }
-                // КРИТИЧНО: Gemini 3.8 Flash отклоняет запросы с 400 Bad Request,
-                // если ход модели пуст или состоит только из пробелов, даже если есть thoughtSignature
                 if (msg.text.isNotBlank()) {
-                    add(
-                        PartDto(
-                            text = msg.text,
-                            thoughtSignature = msg.thoughtSignature
-                        )
-                    )
+                    add(PartDto(text = msg.text, thoughtSignature = msg.thoughtSignature))
                 }
             }
             if (historyParts.isNotEmpty()) {
@@ -502,34 +629,35 @@ class GeminiClient(
             }
         }
 
-        // 2. Формирование текущего хода пользователя
+        // 2. Текущий ход пользователя
         val currentParts = buildList {
-            attachments.forEach { att ->
-                val safeName = escapeXmlAttribute(att.fileName)
-                val safeContent = escapeXmlText(att.content)
-                add(PartDto(text = "<attachment name=\"$safeName\">\n$safeContent\n</attachment>"))
+            if (cachedContentId == null) {
+                attachments.forEach { att ->
+                    val safeName = escapeXmlAttribute(att.fileName)
+                    val safeContent = escapeXmlText(att.content)
+                    add(PartDto(text = "<attachment name=\"$safeName\">\n$safeContent\n</attachment>"))
+                }
             }
             if (prompt.isNotBlank()) {
                 add(PartDto(text = prompt))
             }
         }
 
-        if (currentParts.isEmpty()) {
-            AppLogger.w(AppLogger.TAG_NET, "streamContent: Пустой запрос (нет ни текста, ни файлов)")
+        if (currentParts.isEmpty() && cachedContentId == null) {
             throw GeminiApiException(
                 httpStatusCode = HttpStatusCode.BadRequest,
                 googleErrorCode = "EMPTY_PROMPT",
-                userFriendlyMessage = "Запрос не может быть пустым (введите текст или прикрепите файл)."
+                userFriendlyMessage = "Запрос не может быть пустым."
             )
         }
-        rawTurns.add(ContentDto(role = ChatRole.USER.apiValue, parts = currentParts))
+        if (currentParts.isNotEmpty()) {
+            rawTurns.add(ContentDto(role = ChatRole.USER.apiValue, parts = currentParts))
+        }
 
-        // 3. Отсечение ведущих сообщений модели
         while (rawTurns.isNotEmpty() && rawTurns.first().role != ChatRole.USER.apiValue) {
             rawTurns.removeAt(0)
         }
 
-        // 4. Склеивание подряд идущих сообщений с одинаковой ролью
         val sanitizedContents = ArrayList<ContentDto>(rawTurns.size)
         for (turn in rawTurns) {
             val last = sanitizedContents.lastOrNull()
@@ -543,14 +671,14 @@ class GeminiClient(
             }
         }
 
-        // 5. Системная инструкция
-        val systemDto = if (systemInstruction.isNotBlank()) {
+        val systemDto = if (systemInstruction.isNotBlank() && cachedContentId == null) {
             SystemInstructionDto(listOf(PartDto(text = systemInstruction)))
         } else {
             null
         }
 
         val requestBody = GeminiWireRequest(
+            cachedContent = cachedContentId,
             systemInstruction = systemDto,
             contents = sanitizedContents,
             generationConfig = GenerationConfigDto(
@@ -570,7 +698,6 @@ class GeminiClient(
         )
 
         val serializedJson = json.encodeToString(GeminiWireRequest.serializer(), requestBody)
-        AppLogger.d(AppLogger.TAG_NET, "streamContent: Сформирован JSON payload (${serializedJson.length} символов)")
 
         var isThinkingPhase = false
         var hasContentStarted = false
@@ -587,9 +714,7 @@ class GeminiClient(
         var latestThoughtSignature: String? = null
         var hasReceivedTerminalFinishReason = false
 
-        // 6. Сетевой вызов
         try {
-            AppLogger.d(AppLogger.TAG_NET, "streamContent: Открытие HTTP POST сокета к $endpointUrl [Key: ${AppLogger.maskKey(apiKey)}]")
             httpClient.preparePost(endpointUrl) {
                 header("x-goog-api-key", apiKey)
                 header(HttpHeaders.Accept, "text/event-stream")
@@ -598,11 +723,9 @@ class GeminiClient(
                 contentType(ContentType.Application.Json)
                 setBody(serializedJson)
             }.execute { httpResponse ->
-                AppLogger.i(AppLogger.TAG_NET, "streamContent: Ответ сервера получен: HTTP ${httpResponse.status.value} ${httpResponse.status.description}")
-
                 if (!httpResponse.status.isSuccess()) {
                     val errorBody = httpResponse.bodyAsText()
-                    AppLogger.e(AppLogger.TAG_NET, "streamContent: Ошибка HTTP ${httpResponse.status.value}. Body: $errorBody")
+                    AppLogger.e(AppLogger.TAG_NET, "streamContent: HTTP ${httpResponse.status.value}: $errorBody")
                     val parsedError = runCatching {
                         json.decodeFromString(GoogleApiErrorContainer.serializer(), errorBody).error
                     }.getOrNull()
@@ -625,6 +748,8 @@ class GeminiClient(
                         }
                         HttpStatusCode.Unauthorized, HttpStatusCode.Forbidden ->
                             "Неверный API-ключ Gemini или доступ запрещен."
+                        HttpStatusCode.NotFound ->
+                            "Запрошенный ресурс или кэш контекста не найден (HTTP 404)."
                         HttpStatusCode.BadRequest ->
                             parsedError?.message?.takeIf { it.isNotBlank() }
                                 ?: rawFallback.ifBlank { "Некорректные параметры запроса." }
@@ -644,24 +769,19 @@ class GeminiClient(
                 val channel: ByteReadChannel = httpResponse.bodyAsChannel()
                 val sseEventDataBuffer = StringBuilder()
                 var receivedTerminalDone = false
-                AppLogger.d(AppLogger.TAG_NET, "streamContent: ByteReadChannel открыт, слушаем SSE события...")
 
-                // 7. Обработка неделимого W3C SSE JSON-пакета
                 suspend fun processCompleteSsePayload(dataPayload: String) {
                     if (dataPayload.isEmpty() || dataPayload == "[DONE]") return
 
                     val chunk = try {
                         json.decodeFromString(GeminiResponseChunk.serializer(), dataPayload)
                     } catch (e: SerializationException) {
-                        AppLogger.w(AppLogger.TAG_NET, "streamContent: Ошибка десериализации чанка: ${e.message}")
                         return
                     } catch (e: IllegalArgumentException) {
-                        AppLogger.w(AppLogger.TAG_NET, "streamContent: Некорректный JSON аргумент: ${e.message}")
                         return
                     }
 
                     chunk.error?.let { sseError ->
-                        AppLogger.e(AppLogger.TAG_NET, "streamContent: Внутри SSE пришла ошибка API: [${sseError.status}] ${sseError.message}")
                         val retrySec = extractRetryDelaySeconds(sseError)
                         val statusCode = runCatching {
                             HttpStatusCode.fromValue(if (sseError.code in 100..599) sseError.code else 500)
@@ -677,7 +797,6 @@ class GeminiClient(
 
                     chunk.promptFeedback?.let { feedback ->
                         if (!feedback.blockReason.isNullOrBlank()) {
-                            AppLogger.w(AppLogger.TAG_NET, "streamContent: Запрос заблокирован политикой: ${feedback.blockReason}")
                             throw GeminiApiException(
                                 httpStatusCode = HttpStatusCode.BadRequest,
                                 googleErrorCode = "PROMPT_BLOCKED_${feedback.blockReason}",
@@ -702,14 +821,11 @@ class GeminiClient(
                             "PROHIBITED_CONTENT" -> FinishReason.PROHIBITED_CONTENT
                             else -> FinishReason.UNKNOWN
                         }
-                        AppLogger.i(AppLogger.TAG_NET, "streamContent: FinishReason зафиксирован: $finalFinishReason")
                     }
 
-                    // 1) Обработка частей контента
                     candidate?.content?.parts?.forEach { part ->
                         part.resolveThoughtSignature()?.let { signature ->
                             latestThoughtSignature = signature
-                            AppLogger.d(AppLogger.TAG_NET, "streamContent: Обновлена thoughtSignature (длина: ${signature.length})")
                         }
 
                         val text = part.text ?: return@forEach
@@ -719,45 +835,38 @@ class GeminiClient(
                             if (!isThinkingPhase) {
                                 isThinkingPhase = true
                                 currentThinkingStartTime = SystemClock.elapsedRealtime()
-                                AppLogger.d(AppLogger.TAG_NET, "streamContent: Фаза рассуждений (Thinking) началась")
-                                emit(GeminiStreamEvent.ThinkingStarted)
+                                collector(GeminiStreamEvent.ThinkingStarted)
                             }
                             totalThoughtChars += text.length
-                            AppLogger.v(AppLogger.TAG_NET, "streamContent: ThinkingDelta (+${text.length} символов, всего=$totalThoughtChars)")
-                            emit(GeminiStreamEvent.ThinkingDelta(text))
+                            collector(GeminiStreamEvent.ThinkingDelta(text))
                         } else {
                             if (isThinkingPhase) {
                                 isThinkingPhase = false
                                 val duration = (SystemClock.elapsedRealtime() - currentThinkingStartTime).coerceAtLeast(0L)
-                                AppLogger.i(AppLogger.TAG_NET, "streamContent: Фаза рассуждений завершена за ${duration}мс ($totalThoughtChars символов)")
-                                emit(GeminiStreamEvent.ThinkingCompleted(duration, totalThoughtChars))
+                                collector(GeminiStreamEvent.ThinkingCompleted(duration, totalThoughtChars))
                             }
                             if (!hasContentStarted) {
                                 hasContentStarted = true
-                                AppLogger.d(AppLogger.TAG_NET, "streamContent: Фаза генерации ответа (Content) началась")
-                                emit(GeminiStreamEvent.ContentStarted)
+                                collector(GeminiStreamEvent.ContentStarted)
                             }
                             accumulatedContentText.append(text)
-                            AppLogger.v(AppLogger.TAG_NET, "streamContent: ContentDelta (+${text.length} символов, накоплено=${accumulatedContentText.length})")
-                            emit(GeminiStreamEvent.ContentDelta(text))
+                            collector(GeminiStreamEvent.ContentDelta(text))
                         }
                     }
 
                     if (finalFinishReason == FinishReason.MAX_TOKENS && !hasContentStarted) {
                         hasContentStarted = true
-                        emit(GeminiStreamEvent.ContentStarted)
-                        val limitWarning = "\n\n*(Лимит токенов исчерпан на этапе рассуждений. Попробуйте задать более узкий вопрос или переключить уровень на LOW)*"
+                        collector(GeminiStreamEvent.ContentStarted)
+                        val limitWarning = "\n\n*(Лимит токенов исчерпан на этапе рассуждений. Переключите уровень на LOW)*"
                         accumulatedContentText.append(limitWarning)
-                        emit(GeminiStreamEvent.ContentDelta(limitWarning))
+                        collector(GeminiStreamEvent.ContentDelta(limitWarning))
                     }
 
-                    // 2) Метаданные поиска (Grounding)
                     candidate?.groundingMetadata?.let { meta ->
                         meta.webSearchQueries?.let { queries ->
                             val newQueries = queries.filter { discoveredQueries.add(it) }
                             if (newQueries.isNotEmpty()) {
-                                AppLogger.i(AppLogger.TAG_NET, "streamContent: Поисковые запросы Google: $newQueries")
-                                emit(GeminiStreamEvent.SearchQueriesDiscovered(newQueries))
+                                collector(GeminiStreamEvent.SearchQueriesDiscovered(newQueries))
                             }
                         }
 
@@ -780,8 +889,7 @@ class GeminiClient(
                                 }
                             }
                             if (newSourcesBatch.isNotEmpty()) {
-                                AppLogger.i(AppLogger.TAG_NET, "streamContent: Обнаружены веб-источники: ${newSourcesBatch.size} шт.")
-                                emit(GeminiStreamEvent.SourcesDiscovered(newSourcesBatch))
+                                collector(GeminiStreamEvent.SourcesDiscovered(newSourcesBatch))
                             }
                         }
 
@@ -813,8 +921,7 @@ class GeminiClient(
                                 }
                                 val uniqueCitations = citations.filter { discoveredCitations.add(it) }
                                 if (uniqueCitations.isNotEmpty()) {
-                                    AppLogger.d(AppLogger.TAG_NET, "streamContent: Обнаружены инлайн-цитаты: ${uniqueCitations.size} шт.")
-                                    emit(GeminiStreamEvent.CitationsDiscovered(uniqueCitations))
+                                    collector(GeminiStreamEvent.CitationsDiscovered(uniqueCitations))
                                 }
                             }
                         }
@@ -822,8 +929,7 @@ class GeminiClient(
                         if (!emittedSearchEntryPoint) {
                             meta.searchEntryPoint?.renderedContent?.let { htmlSnippet ->
                                 if (htmlSnippet.isNotBlank()) {
-                                    AppLogger.d(AppLogger.TAG_NET, "streamContent: Получен searchEntryPoint HTML виджет")
-                                    emit(GeminiStreamEvent.SearchEntryPointRendered(htmlSnippet))
+                                    collector(GeminiStreamEvent.SearchEntryPointRendered(htmlSnippet))
                                     emittedSearchEntryPoint = true
                                 }
                             }
@@ -835,12 +941,7 @@ class GeminiClient(
                         val promptTotal = usage.promptTokenCount
                         val hitRate = if (promptTotal > 0) (cached.toFloat() / promptTotal.toFloat()) * 100f else 0f
 
-                        AppLogger.i(
-                            AppLogger.TAG_NET,
-                            "streamContent: Токены: Prompt=${usage.promptTokenCount}, Thoughts=${usage.thoughtsTokenCount}, Cand=${usage.candidatesTokenCount}, Total=${usage.totalTokenCount}, CacheHit=${hitRate.toInt()}%"
-                        )
-
-                        emit(
+                        collector(
                             GeminiStreamEvent.UsageReported(
                                 promptTokens = promptTotal,
                                 candidateTokens = usage.candidatesTokenCount,
@@ -853,7 +954,6 @@ class GeminiClient(
                     }
                 }
 
-                // 8. Разбор потока W3C SSE со встроенным Watchdog
                 while (!channel.isClosedForRead && !receivedTerminalDone) {
                     currentCoroutineContext().ensureActive()
 
@@ -862,23 +962,15 @@ class GeminiClient(
                     }
 
                     if (rawLine == null) {
-                        if (channel.isClosedForRead) {
-                            AppLogger.d(AppLogger.TAG_NET, "streamContent: Канал корректно закрыт со стороны сервера (TCP FIN)")
-                            break
-                        }
+                        if (channel.isClosedForRead) break
 
-                        // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:
-                        // Завершаем стрим только в том случае, если полезный ответ уже сформирован.
-                        // Если были получены только мысли, то обрыв недопустим — это сбой времени ожидания контента.
                         if (accumulatedContentText.isNotEmpty()) {
-                            AppLogger.w(AppLogger.TAG_NET, "streamContent: Watchdog таймаут (${SSE_IDLE_TIMEOUT_MS}мс), но ответ уже сформирован. Завершаем стрим.")
                             break
                         } else {
-                            AppLogger.e(AppLogger.TAG_NET, "streamContent: Watchdog таймаут ожидания ответа (${SSE_IDLE_TIMEOUT_MS}мс)")
                             throw GeminiApiException(
                                 httpStatusCode = HttpStatusCode.GatewayTimeout,
                                 googleErrorCode = "REASONING_IDLE_TIMEOUT",
-                                userFriendlyMessage = "Модель затратила слишком много времени на вычисления. Попробуйте уровень LOW или повторите запрос."
+                                userFriendlyMessage = "Модель превысила время ожидания ответа. Попробуйте уровень LOW."
                             )
                         }
                     }
@@ -894,15 +986,11 @@ class GeminiClient(
                         continue
                     }
 
-                    if (line.startsWith(":")) {
-                        AppLogger.v(AppLogger.TAG_NET, "streamContent: SSE keep-alive пинг: $line")
-                        continue
-                    }
+                    if (line.startsWith(":")) continue
 
                     if (line.startsWith("data:")) {
                         val dataPart = line.removePrefix("data:").trimStart()
                         if (dataPart == "[DONE]") {
-                            AppLogger.d(AppLogger.TAG_NET, "streamContent: Получен маркер [DONE], штатное завершение")
                             receivedTerminalDone = true
                             break
                         }
@@ -921,45 +1009,39 @@ class GeminiClient(
 
                 val hasReceivedAnyContent = totalThoughtChars > 0 || accumulatedContentText.isNotEmpty()
                 if (!hasReceivedTerminalFinishReason && !hasReceivedAnyContent) {
-                    AppLogger.e(AppLogger.TAG_NET, "streamContent: Разрыв соединения до получения содержимого")
                     throw GeminiApiException(
                         httpStatusCode = HttpStatusCode.GatewayTimeout,
                         googleErrorCode = "PREMATURE_STREAM_DISCONNECT",
-                        userFriendlyMessage = "Сетевое соединение прервалось до получения ответа. Повторите запрос."
+                        userFriendlyMessage = "Сетевое соединение прервалось до получения ответа."
                     )
                 }
 
                 if (isThinkingPhase) {
                     val duration = (SystemClock.elapsedRealtime() - currentThinkingStartTime).coerceAtLeast(0L)
-                    emit(GeminiStreamEvent.ThinkingCompleted(duration, totalThoughtChars))
+                    collector(GeminiStreamEvent.ThinkingCompleted(duration, totalThoughtChars))
                 }
 
                 val totalDuration = (SystemClock.elapsedRealtime() - startTime).coerceAtLeast(0L)
-                AppLogger.i(AppLogger.TAG_NET, "streamContent: Запрос успешно завершен за ${totalDuration}мс. FinishReason=$finalFinishReason")
-                emit(GeminiStreamEvent.Completed(finalFinishReason, totalDuration, latestThoughtSignature))
+                collector(GeminiStreamEvent.Completed(finalFinishReason, totalDuration, latestThoughtSignature))
             }
         } catch (e: CancellationException) {
-            AppLogger.w(AppLogger.TAG_NET, "streamContent: Генерация отменена корутиной")
             throw e
         } catch (e: GeminiApiException) {
-            AppLogger.e(AppLogger.TAG_NET, "streamContent: Ошибка Gemini API: [${e.httpStatusCode} | ${e.googleErrorCode}] ${e.userFriendlyMessage}")
             throw e
         } catch (e: HttpRequestTimeoutException) {
-            AppLogger.e(AppLogger.TAG_NET, "streamContent: Сетевой таймаут ожидания (HttpRequestTimeoutException)", e)
             throw GeminiApiException(
                 httpStatusCode = HttpStatusCode.RequestTimeout,
                 googleErrorCode = "REQUEST_TIMEOUT",
-                userFriendlyMessage = "Время ожидания ответа от Gemini истекло. Повторите запрос."
+                userFriendlyMessage = "Время ожидания ответа от Gemini истекло."
             )
         } catch (e: IOException) {
-            AppLogger.e(AppLogger.TAG_NET, "streamContent: Ошибка ввода/вывода (IOException): ${e.message}", e)
             throw GeminiApiException(
                 httpStatusCode = HttpStatusCode.GatewayTimeout,
                 googleErrorCode = "NETWORK_UNAVAILABLE",
                 userFriendlyMessage = "Сетевая ошибка: проверьте интернет-соединение на устройстве."
             )
         }
-    }.flowOn(Dispatchers.IO + TrafficStatsElement(ANDROID_NET_TAG))
+    }
 
     private fun parseRetryAfter(headerValue: String?): Long? {
         if (headerValue.isNullOrBlank()) return null
@@ -991,7 +1073,6 @@ class GeminiClient(
 
     override fun close() {
         if (shouldCloseHttpClient) {
-            AppLogger.d(AppLogger.TAG_NET, "GeminiClient: Закрытие HttpClient CIO")
             httpClient.close()
         }
     }

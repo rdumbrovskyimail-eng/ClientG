@@ -53,8 +53,10 @@ data class ChatUiState(
     val inputText: String = "",
     val attachedFiles: List<TextAttachment> = emptyList(),
     val isGenerating: Boolean = false,
-    val enableSearch: Boolean = true,
-    val thinkingLevel: ThinkingLevel = ThinkingLevel.HIGH,
+    // Дефолт false для исключения мгновенных 429 ошибок на Free Tier ключах
+    val enableSearch: Boolean = false,
+    // Рекомендованный Google дефолтный уровень для gemini-3.8-flash
+    val thinkingLevel: ThinkingLevel = ThinkingLevel.MEDIUM,
     val apiKey: String = "",
     val isApiKeyDialogOpen: Boolean = false,
     val errorMessage: String? = null,
@@ -79,13 +81,11 @@ class ChatViewModel @JvmOverloads constructor(
     private val externalClient: GeminiClient? = null
 ) : AndroidViewModel(application) {
 
-    // Восстановление черновика ввода после Process Death
     private val initialInputText: String = savedStateHandle?.get<String>(KEY_INPUT_DRAFT) ?: ""
 
     private val _uiState = MutableStateFlow(ChatUiState(inputText = initialInputText))
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
 
-    // Буферизованный канал с DROP_OLDEST исключает дедлок фоновой генерации при свернутом UI
     private val _uiEffects = Channel<ChatUiSideEffect>(
         capacity = Channel.BUFFERED,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
@@ -98,12 +98,10 @@ class ChatViewModel @JvmOverloads constructor(
     private var generationJob: Job? = null
     private var countdownJob: Job? = null
 
-    // Потокобезопасная инициализация SharedPreferences с защитой от гонок памяти в JMM
     @Volatile
     private var securePrefs: SharedPreferences? = null
     private val prefsMutex = Mutex()
 
-    // Изолированный кэш API-ключа вне частых снимков StateFlow
     @Volatile
     private var cachedApiKey: String = ""
 
@@ -116,7 +114,6 @@ class ChatViewModel @JvmOverloads constructor(
     }
 
     init {
-        // Асинхронная загрузка ключа из Keystore (защита от DiskReadViolation на холодном старте)
         viewModelScope.launch(Dispatchers.IO) {
             val prefs = getSecurePrefs()
             val savedKey = prefs.getString(PREF_KEY_API_KEY, "") ?: ""
@@ -224,7 +221,6 @@ class ChatViewModel @JvmOverloads constructor(
                 var fileName = "attachment.txt"
                 var fileSize = 0L
 
-                // ИСПРАВЛЕНИЕ ОШИБКИ КОМПИЛЯЦИИ: ровно 6 аргументов для вызова query с CancellationSignal
                 resolver.query(uri, null, null, null, null, signal)?.use { cursor ->
                     val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                     val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)

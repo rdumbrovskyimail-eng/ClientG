@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
 import android.os.CancellationSignal
-import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
@@ -13,6 +12,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.clientg.network.*
+import com.clientg.util.AppLogger
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
@@ -20,28 +20,21 @@ import kotlinx.coroutines.flow.*
 import java.io.InputStream
 import java.util.UUID
 
-// ====================================================================
-// 1. Модели состояния и одноразовых эффектов (Presentation Layer)
-// ====================================================================
-
 data class UiChatMessage(
     val id: String = UUID.randomUUID().toString(),
     val role: ChatRole,
     val text: String = "",
     val attachments: List<TextAttachment> = emptyList(),
     val thoughtSignature: String? = null,
-    // Блок рассуждений (Thinking Engine)
     val thoughtText: String = "",
     val thinkingDurationMs: Long = 0L,
     val isThinkingActive: Boolean = false,
     val isThinkingExpanded: Boolean = false,
-    val hasThoughts: Boolean = false, // Постоянный якорь: карточка мыслей больше никогда не исчезает
-    // Блок поиска Google Search Grounding
+    val hasThoughts: Boolean = false,
     val searchQueries: List<String> = emptyList(),
     val sources: List<GroundingSource> = emptyList(),
     val citations: List<InlineCitation> = emptyList(),
     val searchSuggestionsHtml: String? = null,
-    // Метаданные токенизации и статус
     val usage: GeminiStreamEvent.UsageReported? = null,
     val finishReason: FinishReason? = null,
     val isStreaming: Boolean = false
@@ -67,10 +60,6 @@ sealed interface ChatUiSideEffect {
     data object HapticGenerationFinished : ChatUiSideEffect
     data class ShowToast(val message: String) : ChatUiSideEffect
 }
-
-// ====================================================================
-// 2. ViewModel: ChatViewModel
-// ====================================================================
 
 class ChatViewModel @JvmOverloads constructor(
     application: Application,
@@ -109,11 +98,16 @@ class ChatViewModel @JvmOverloads constructor(
     }
 
     init {
+        AppLogger.i(AppLogger.TAG_VM, "ChatViewModel: Инициализация. Чтение ключа из Knox Vault...")
         viewModelScope.launch(Dispatchers.IO) {
             val prefs = getSecurePrefs(getApplication())
             val savedKey = prefs.getString(PREF_KEY_API_KEY, "") ?: ""
             cachedApiKey = savedKey
             _uiState.update { it.copy(apiKey = savedKey) }
+            AppLogger.d(
+                AppLogger.TAG_VM,
+                "ChatViewModel: Ключ прочитан: ${if (savedKey.isNotBlank()) AppLogger.maskKey(savedKey) else "ПУСТО"}"
+            )
         }
 
         if (externalClient != null) {
@@ -127,34 +121,35 @@ class ChatViewModel @JvmOverloads constructor(
         }
     }
 
-    // ================================================================
-    // Пользовательские интенты (User Actions)
-    // ================================================================
-
     fun onInputTextChanged(newText: String) {
         savedStateHandle?.set(KEY_INPUT_DRAFT, newText)
         _uiState.update { it.copy(inputText = newText) }
     }
 
     fun onToggleSearch(enabled: Boolean) {
+        AppLogger.i(AppLogger.TAG_VM, "onToggleSearch: $enabled")
         _uiState.update { it.copy(enableSearch = enabled) }
     }
 
     fun onThinkingLevelChanged(level: ThinkingLevel) {
+        AppLogger.i(AppLogger.TAG_VM, "onThinkingLevelChanged: $level")
         _uiState.update { it.copy(thinkingLevel = level) }
     }
 
     fun onOpenApiKeyDialog() {
+        AppLogger.d(AppLogger.TAG_VM, "onOpenApiKeyDialog")
         _uiState.update { it.copy(isApiKeyDialogOpen = true) }
     }
 
     fun onCloseApiKeyDialog() {
+        AppLogger.d(AppLogger.TAG_VM, "onCloseApiKeyDialog")
         _uiState.update { it.copy(isApiKeyDialogOpen = false) }
     }
 
     fun onSaveApiKey(newKey: String) {
         val trimmed = newKey.trim()
         cachedApiKey = trimmed
+        AppLogger.i(AppLogger.TAG_VM, "onSaveApiKey: Сохранение ключа ${AppLogger.maskKey(trimmed)} в защищенное хранилище...")
         viewModelScope.launch(Dispatchers.IO) {
             getSecurePrefs(getApplication()).edit().putString(PREF_KEY_API_KEY, trimmed).apply()
             _uiState.update {
@@ -169,10 +164,12 @@ class ChatViewModel @JvmOverloads constructor(
     }
 
     fun onDismissError() {
+        AppLogger.d(AppLogger.TAG_VM, "onDismissError")
         _uiState.update { it.copy(errorMessage = null) }
     }
 
     fun onToggleThinkingAccordion(messageId: String) {
+        AppLogger.d(AppLogger.TAG_VM, "onToggleThinkingAccordion: id=$messageId")
         _uiState.update { state ->
             val messages = state.messages
             val idx = messages.indexOfFirst { it.id == messageId }
@@ -188,6 +185,7 @@ class ChatViewModel @JvmOverloads constructor(
     }
 
     fun onClearChat() {
+        AppLogger.i(AppLogger.TAG_VM, "onClearChat: Очистка всей истории чата")
         onCancelGeneration()
         _uiState.update {
             it.copy(
@@ -199,11 +197,8 @@ class ChatViewModel @JvmOverloads constructor(
         }
     }
 
-    // ================================================================
-    // Безопасная работа с вложениями (Storage Access Framework)
-    // ================================================================
-
     fun onAttachFileUri(uri: Uri) {
+        AppLogger.i(AppLogger.TAG_VM, "onAttachFileUri: Получен URI для вложения: $uri")
         viewModelScope.launch(Dispatchers.IO) {
             val signal = CancellationSignal()
             val job = coroutineContext.job
@@ -229,11 +224,13 @@ class ChatViewModel @JvmOverloads constructor(
                     }
                 }
 
+                AppLogger.d(AppLogger.TAG_VM, "onAttachFileUri: Файл '$fileName' ($fileSize байт)")
+
                 val maxBytes = TextAttachment.MAX_ATTACHMENT_CHARS.toLong() * 4L
                 if (fileSize > 0L && fileSize > maxBytes) {
                     val sizeMb = fileSize / (1024 * 1024)
                     val limitMb = maxBytes / (1024 * 1024)
-                    throw IllegalArgumentException("Файл '$fileName' ($sizeMb МБ) превышает допустимый лимит ($limitMb МБ).")
+                    throw IllegalArgumentException("Файл '$fileName' ($sizeMb МБ) превышает лимит ($limitMb МБ).")
                 }
 
                 val content = resolver.openInputStream(uri)?.use { stream ->
@@ -241,6 +238,7 @@ class ChatViewModel @JvmOverloads constructor(
                 } ?: throw IllegalArgumentException("Не удалось открыть поток чтения файла.")
 
                 val newAttachment = TextAttachment(fileName = fileName, content = content)
+                AppLogger.i(AppLogger.TAG_VM, "onAttachFileUri: Файл успешно прочитан (${content.length} символов)")
 
                 withContext(Dispatchers.Main) {
                     _uiState.update { current ->
@@ -255,6 +253,7 @@ class ChatViewModel @JvmOverloads constructor(
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
+                AppLogger.e(AppLogger.TAG_VM, "onAttachFileUri: Ошибка прикрепления файла", e)
                 withContext(Dispatchers.Main) {
                     _uiState.update { it.copy(errorMessage = "Ошибка вложения: ${e.localizedMessage}") }
                 }
@@ -265,6 +264,7 @@ class ChatViewModel @JvmOverloads constructor(
     }
 
     fun onRemoveAttachment(attachment: TextAttachment) {
+        AppLogger.d(AppLogger.TAG_VM, "onRemoveAttachment: Удален файл '${attachment.fileName}'")
         _uiState.update { it.copy(attachedFiles = it.attachedFiles - attachment) }
     }
 
@@ -310,19 +310,21 @@ class ChatViewModel @JvmOverloads constructor(
         return result
     }
 
-    // ================================================================
-    // Оркестрация стриминга с интеграцией TypewriterEngine
-    // ================================================================
-
     fun onSendMessage() {
         val state = _uiState.value
         val prompt = state.inputText.trim()
         val attachments = state.attachedFiles
 
+        AppLogger.i(
+            AppLogger.TAG_VM,
+            "onSendMessage: Запрос='${prompt.take(60)}...', Вложений=${attachments.size}, Thinking=${state.thinkingLevel}, Search=${state.enableSearch}"
+        )
+
         if (prompt.isBlank() && attachments.isEmpty()) return
         if (state.isGenerating) return
 
         if (state.apiKey.isBlank() && cachedApiKey.isBlank()) {
+            AppLogger.w(AppLogger.TAG_VM, "onSendMessage: API-ключ отсутствует!")
             _uiState.update {
                 it.copy(
                     isApiKeyDialogOpen = true,
@@ -350,7 +352,6 @@ class ChatViewModel @JvmOverloads constructor(
             hasThoughts = true
         )
 
-        // Предотвращение обрыва генерации: сохраняем thoughtSignature от предыдущих ходов!
         val sanitizedHistory = state.messages.mapNotNull { msg ->
             if (msg.text.isBlank() && msg.attachments.isEmpty() && msg.thoughtSignature == null) {
                 null
@@ -387,10 +388,12 @@ class ChatViewModel @JvmOverloads constructor(
     }
 
     fun onRetryLastMessage() {
+        AppLogger.i(AppLogger.TAG_VM, "onRetryLastMessage")
         onRetryMessage(targetMessageId = null)
     }
 
     fun onRetryMessage(targetMessageId: String? = null) {
+        AppLogger.i(AppLogger.TAG_VM, "onRetryMessage: targetId=$targetMessageId")
         val state = _uiState.value
         if (state.isGenerating) return
 
@@ -461,7 +464,7 @@ class ChatViewModel @JvmOverloads constructor(
         _uiEffects.trySend(ChatUiSideEffect.HapticLightTick)
 
         generationJob = viewModelScope.launch(Dispatchers.IO) {
-            // Инициализация кадрового интерполятора
+            AppLogger.d(AppLogger.TAG_VM, "executeStream: Запуск интерполятора TypewriterEngine...")
             val typewriter = TypewriterEngine(
                 onFrame = { thoughtDelta, contentDelta ->
                     if (thoughtDelta.isEmpty() && contentDelta.isEmpty()) return@TypewriterEngine
@@ -482,6 +485,7 @@ class ChatViewModel @JvmOverloads constructor(
                     }
                 },
                 onComplete = {
+                    AppLogger.i(AppLogger.TAG_VM, "executeStream: Печать текста полностью завершена")
                     _uiState.update { currentState ->
                         val messages = currentState.messages
                         val idx = messages.indexOfLast { it.id == assistantMessageId }
@@ -515,6 +519,7 @@ class ChatViewModel @JvmOverloads constructor(
                 ).collect { event ->
                     when (event) {
                         is GeminiStreamEvent.ThinkingStarted -> {
+                            AppLogger.d(AppLogger.TAG_VM, "Поток: событие ThinkingStarted")
                             withContext(Dispatchers.Main.immediate) {
                                 handleDiscreteEvent(assistantMessageId, event)
                             }
@@ -525,6 +530,7 @@ class ChatViewModel @JvmOverloads constructor(
                         }
 
                         is GeminiStreamEvent.ThinkingCompleted -> {
+                            AppLogger.d(AppLogger.TAG_VM, "Поток: событие ThinkingCompleted (${event.durationMs}мс)")
                             typewriter.markThinkingEnded()
                             withContext(Dispatchers.Main.immediate) {
                                 handleDiscreteEvent(assistantMessageId, event)
@@ -533,6 +539,7 @@ class ChatViewModel @JvmOverloads constructor(
                         }
 
                         is GeminiStreamEvent.ContentStarted -> {
+                            AppLogger.d(AppLogger.TAG_VM, "Поток: событие ContentStarted")
                             typewriter.markThinkingEnded()
                             withContext(Dispatchers.Main.immediate) {
                                 handleDiscreteEvent(assistantMessageId, event)
@@ -545,6 +552,7 @@ class ChatViewModel @JvmOverloads constructor(
                         }
 
                         is GeminiStreamEvent.Completed -> {
+                            AppLogger.i(AppLogger.TAG_VM, "Поток: событие Completed (${event.totalDurationMs}мс)")
                             typewriter.markStreamEnded()
                             withContext(Dispatchers.Main.immediate) {
                                 handleDiscreteEvent(assistantMessageId, event)
@@ -559,6 +567,7 @@ class ChatViewModel @JvmOverloads constructor(
                     }
                 }
             } catch (_: CancellationException) {
+                AppLogger.w(AppLogger.TAG_VM, "executeStream: Корутина отменена")
                 withContext(NonCancellable) {
                     typewriter.stopAndFlush()
                     withContext(Dispatchers.Main.immediate) {
@@ -566,6 +575,7 @@ class ChatViewModel @JvmOverloads constructor(
                     }
                 }
             } catch (e: GeminiApiException) {
+                AppLogger.e(AppLogger.TAG_VM, "executeStream: Поймано GeminiApiException: ${e.message}")
                 withContext(NonCancellable) {
                     typewriter.stopAndFlush()
                     withContext(Dispatchers.Main.immediate) {
@@ -573,6 +583,7 @@ class ChatViewModel @JvmOverloads constructor(
                     }
                 }
             } catch (e: Exception) {
+                AppLogger.e(AppLogger.TAG_VM, "executeStream: Непредвиденное исключение", e)
                 withContext(NonCancellable) {
                     typewriter.stopAndFlush()
                     withContext(Dispatchers.Main.immediate) {
@@ -590,6 +601,7 @@ class ChatViewModel @JvmOverloads constructor(
     }
 
     fun onCancelGeneration() {
+        AppLogger.w(AppLogger.TAG_VM, "onCancelGeneration: Остановка генерации пользователем")
         activeTypewriter?.stopAndFlush()
         activeTypewriter = null
         generationJob?.cancel()
@@ -614,7 +626,7 @@ class ChatViewModel @JvmOverloads constructor(
                 )
                 is GeminiStreamEvent.ThinkingCompleted -> currentMsg.copy(
                     isThinkingActive = false,
-                    isThinkingExpanded = false, // Плавно сворачиваем, но не удаляем!
+                    isThinkingExpanded = false,
                     hasThoughts = true,
                     thinkingDurationMs = currentMsg.thinkingDurationMs + event.durationMs
                 )
@@ -649,6 +661,7 @@ class ChatViewModel @JvmOverloads constructor(
     }
 
     private fun finalizeAssistantMessage(assistantMessageId: String, reason: FinishReason) {
+        AppLogger.d(AppLogger.TAG_VM, "finalizeAssistantMessage: id=$assistantMessageId, reason=$reason")
         _uiState.update { state ->
             val filteredMessages = state.messages.filterNot { msg ->
                 msg.id == assistantMessageId && msg.text.isEmpty() && msg.thoughtText.isEmpty()
@@ -667,6 +680,7 @@ class ChatViewModel @JvmOverloads constructor(
     }
 
     private fun handleApiError(assistantMessageId: String, error: GeminiApiException) {
+        AppLogger.e(AppLogger.TAG_VM, "handleApiError: [${error.googleErrorCode}] ${error.userFriendlyMessage} (Retry: ${error.retryAfterSeconds}s)")
         _uiState.update { state ->
             val filteredMessages = state.messages.filterNot { msg ->
                 msg.id == assistantMessageId && msg.text.isEmpty() && msg.thoughtText.isEmpty()
@@ -695,6 +709,7 @@ class ChatViewModel @JvmOverloads constructor(
     }
 
     private fun startRetryCountdown(totalSeconds: Long) {
+        AppLogger.d(AppLogger.TAG_VM, "startRetryCountdown: Обратный отсчет на $totalSeconds сек.")
         countdownJob?.cancel()
         countdownJob = viewModelScope.launch {
             var remaining = totalSeconds
@@ -709,6 +724,7 @@ class ChatViewModel @JvmOverloads constructor(
 
     override fun onCleared() {
         super.onCleared()
+        AppLogger.d(AppLogger.TAG_VM, "ChatViewModel.onCleared")
         activeTypewriter?.stopAndFlush()
         activeTypewriter = null
         generationJob?.cancel()
@@ -734,7 +750,8 @@ class ChatViewModel @JvmOverloads constructor(
                     EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                     EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
                 )
-            } catch (_: Throwable) {
+            } catch (t: Throwable) {
+                AppLogger.w(AppLogger.TAG_VM, "Knox Vault недоступен, откат к fallback SharedPreferences: ${t.message}")
                 context.getSharedPreferences("clientg_prefs_fallback", Context.MODE_PRIVATE)
             }
         }

@@ -25,9 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -49,28 +47,24 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.*
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.clientg.network.ChatRole
 import com.clientg.network.GroundingSource
-import com.clientg.network.InlineCitation
 import com.clientg.network.TextAttachment
 import com.clientg.network.ThinkingLevel
-import com.clientg.presentation.ChatUiSideEffect
-import com.clientg.presentation.ChatViewModel
-import com.clientg.presentation.UiChatMessage
+import com.clientg.presentation.*
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -78,7 +72,6 @@ import java.util.Locale
 // Палитра True Dark AMOLED (WCAG 2.1 AA)
 // ====================================================================
 
-private val AmoledBg = Color(0xFF000000)
 private val AmoledCardBg = Color(0xFF101010)
 private val AmoledSurface = Color(0xFF171717)
 private val AmoledInputBarBg = Color(0xFF1E1E1E)
@@ -96,14 +89,8 @@ private val SearchActiveBg = Color(0xFF0F1E2E)
 private val SearchActiveBorder = Color(0xFF183B5E)
 private val SearchActiveText = Color(0xFF8AB4F8)
 
-private val CodeBlockBg = Color(0xFF080808)
-private val CodeBlockHeaderBg = Color(0xFF121212)
-private val InlineCodeBg = Color(0xFF222222)
-private val InlineCodeText = Color(0xFFFFD54F)
-
 private val BubbleUserShape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp)
 private val CardStandardShape = RoundedCornerShape(14.dp)
-private val CodeBlockShape = RoundedCornerShape(12.dp)
 private val ChipStandardShape = RoundedCornerShape(12.dp)
 private val InputBarCapsuleShape = RoundedCornerShape(26.dp)
 
@@ -228,12 +215,23 @@ fun ChatGptScreen(
     val coroutineScope = rememberCoroutineScope()
     var showClearChatDialog by remember { mutableStateOf(false) }
 
+    // Защита от засыпания экрана во время генерации (Первоисточник 41)
+    val currentView = LocalView.current
+    DisposableEffect(uiState.isGenerating) {
+        currentView.keepScreenOn = uiState.isGenerating
+        onDispose {
+            currentView.keepScreenOn = false
+        }
+    }
+
+    // Умный автоскролл (Первоисточники 9 и 40): примагничивает только если пользователь у дна
     val isAtBottom by remember {
         derivedStateOf {
-            val total = listState.layoutInfo.totalItemsCount
+            val layoutInfo = listState.layoutInfo
+            val total = layoutInfo.totalItemsCount
             if (total == 0) return@derivedStateOf true
-            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            lastVisible >= total - 2
+            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            lastVisible >= total - 1
         }
     }
 
@@ -287,8 +285,8 @@ fun ChatGptScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarsPadding()
-            .displayCutoutPadding()
+            // Безопасная обработка выреза фронтальной камеры и клавиатуры (Первоисточник 42)
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top))
             .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime))
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -576,14 +574,11 @@ private fun ChatTopBar(
                 Spacer(modifier = Modifier.width(6.dp))
 
                 Box {
-                    // Интерактивный бейдж выбора режима с индикатором и стрелкой
                     Surface(
                         shape = RoundedCornerShape(8.dp),
                         color = Color(0xFF16202E),
                         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF24364D)),
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .clickable { menuExpanded = true }
+                        modifier = Modifier.clickable { menuExpanded = true }
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -671,7 +666,7 @@ private fun ChatTopBar(
                 }
             }
             Text(
-                text = "Snapdragon 8 Gen 2 • 120Hz LTPO AMOLED",
+                text = "Snapdragon 8 Gen 2 • Dynamic VSYNC Engine",
                 color = TextSecondary,
                 fontSize = 11.sp,
                 style = DefaultTextStyle
@@ -682,7 +677,6 @@ private fun ChatTopBar(
             IconButton(
                 onClick = onClearChat,
                 modifier = Modifier
-                    .minimumInteractiveComponentSize()
                     .size(40.dp)
                     .clip(CircleShape)
                     .background(AmoledSurface)
@@ -700,7 +694,6 @@ private fun ChatTopBar(
             IconButton(
                 onClick = onOpenApiKeyDialog,
                 modifier = Modifier
-                    .minimumInteractiveComponentSize()
                     .size(40.dp)
                     .clip(CircleShape)
                     .background(AmoledSurface)
@@ -774,9 +767,7 @@ private fun ErrorBanner(
 
             IconButton(
                 onClick = onDismiss,
-                modifier = Modifier
-                    .minimumInteractiveComponentSize()
-                    .size(36.dp)
+                modifier = Modifier.size(36.dp)
             ) {
                 Icon(Icons.Default.Close, contentDescription = "Закрыть", tint = Color(0xFFFFB4A9), modifier = Modifier.size(18.dp))
             }
@@ -860,7 +851,8 @@ private fun ChatMessageItem(
             }
         } else {
             Column(modifier = Modifier.fillMaxWidth()) {
-                if (message.thoughtText.isNotEmpty() || message.isThinkingActive) {
+                // Карточка рассуждений: постоянный якорь через hasThoughts (Первоисточник 8)
+                if (message.hasThoughts || message.thoughtText.isNotEmpty() || message.isThinkingActive) {
                     ThinkingAccordionCard(
                         thoughtText = message.thoughtText,
                         durationMs = message.thinkingDurationMs,
@@ -883,20 +875,12 @@ private fun ChatMessageItem(
 
                 if (message.text.isNotEmpty()) {
                     SelectionContainer {
-                        NativeMarkdownContent(
+                        StreamingMarkdownContent(
                             text = message.text,
                             citations = message.citations,
                             onOpenUrl = onOpenUrl
                         )
                     }
-                } else if (message.isStreaming && !message.isThinkingActive) {
-                    Text(
-                        text = "Генерирует ответ...",
-                        color = TextSecondary,
-                        fontSize = 14.sp,
-                        fontStyle = FontStyle.Italic,
-                        style = DefaultTextStyle
-                    )
                 }
 
                 if (!message.isStreaming && message.text.isNotEmpty()) {
@@ -924,9 +908,7 @@ private fun ChatMessageItem(
                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                     isCopied = true
                                 },
-                                modifier = Modifier
-                                    .minimumInteractiveComponentSize()
-                                    .size(36.dp)
+                                modifier = Modifier.size(36.dp)
                             ) {
                                 Icon(
                                     imageVector = if (isCopied) Icons.Default.Check else CopyIcon,
@@ -938,9 +920,7 @@ private fun ChatMessageItem(
 
                             IconButton(
                                 onClick = { onShareText(message.text) },
-                                modifier = Modifier
-                                    .minimumInteractiveComponentSize()
-                                    .size(36.dp)
+                                modifier = Modifier.size(36.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Share,
@@ -952,9 +932,7 @@ private fun ChatMessageItem(
 
                             IconButton(
                                 onClick = onRegenerate,
-                                modifier = Modifier
-                                    .minimumInteractiveComponentSize()
-                                    .size(36.dp)
+                                modifier = Modifier.size(36.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Refresh,
@@ -972,7 +950,7 @@ private fun ChatMessageItem(
 }
 
 // ====================================================================
-// Thinking Accordion
+// Неисчезающий Thinking Accordion
 // ====================================================================
 
 @Composable
@@ -1060,7 +1038,7 @@ private fun ThinkingAccordionCard(
                     Spacer(modifier = Modifier.height(8.dp))
                     SelectionContainer {
                         Text(
-                            text = thoughtText.ifEmpty { "Анализ контекста и синтез ответа..." },
+                            text = thoughtText.ifEmpty { "Анализ контекста и планирование решения..." },
                             color = Color(0xFFB0B0B0),
                             fontSize = 12.sp,
                             lineHeight = 18.sp,
@@ -1075,7 +1053,7 @@ private fun ThinkingAccordionCard(
 }
 
 // ====================================================================
-// Google Search Grounding: карточки источников и подсказки
+// Google Search Grounding: карточки источников
 // ====================================================================
 
 @Composable
@@ -1158,431 +1136,13 @@ private fun SearchGroundingBlock(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    text = "Поисковые подсказки Google доступны в веб-версии ответа",
+                    text = "Поисковые подсказки Google активны",
                     color = TextSecondary,
                     fontSize = 11.sp,
-                    fontStyle = FontStyle.Italic,
                     style = DefaultTextStyle,
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                 )
             }
-        }
-    }
-}
-
-// ====================================================================
-// Нативный Markdown-парсер (CommonMark 0.31.2)
-// ====================================================================
-
-@Composable
-private fun NativeMarkdownContent(
-    text: String,
-    citations: List<InlineCitation>,
-    onOpenUrl: (String) -> Unit
-) {
-    val blocks = remember(text) { parseMarkdownBlocks(text) }
-
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        blocks.forEach { block ->
-            when (block) {
-                is MarkdownBlock.Header -> {
-                    Text(
-                        text = block.text,
-                        color = TextPrimary,
-                        fontSize = when (block.level) {
-                            1 -> 22.sp
-                            2 -> 20.sp
-                            3 -> 18.sp
-                            4 -> 16.sp
-                            5 -> 15.sp
-                            else -> 14.sp
-                        },
-                        fontWeight = FontWeight.Bold,
-                        style = DefaultTextStyle,
-                        modifier = Modifier.padding(top = 6.dp, bottom = 2.dp)
-                    )
-                }
-                is MarkdownBlock.Bullet -> {
-                    Row(modifier = Modifier.padding(start = 4.dp)) {
-                        Text(text = "• ", color = SearchActiveText, fontSize = 15.sp, fontWeight = FontWeight.Bold, style = DefaultTextStyle)
-                        val annotated = remember(block.content) { parseInlineMarkdown(block.content, onOpenUrl) }
-                        Text(
-                            text = annotated,
-                            color = TextPrimary,
-                            fontSize = 15.sp,
-                            lineHeight = 22.sp,
-                            style = DefaultTextStyle
-                        )
-                    }
-                }
-                is MarkdownBlock.NumberedItem -> {
-                    Row(modifier = Modifier.padding(start = 4.dp)) {
-                        Text(text = "${block.number}. ", color = SearchActiveText, fontSize = 15.sp, fontWeight = FontWeight.Bold, style = DefaultTextStyle)
-                        val annotated = remember(block.content) { parseInlineMarkdown(block.content, onOpenUrl) }
-                        Text(
-                            text = annotated,
-                            color = TextPrimary,
-                            fontSize = 15.sp,
-                            lineHeight = 22.sp,
-                            style = DefaultTextStyle
-                        )
-                    }
-                }
-                is MarkdownBlock.Paragraph -> {
-                    val annotated = remember(block.content) { parseInlineMarkdown(block.content, onOpenUrl) }
-                    Text(
-                        text = annotated,
-                        color = TextPrimary,
-                        fontSize = 15.sp,
-                        lineHeight = 22.sp,
-                        style = DefaultTextStyle
-                    )
-                }
-                is MarkdownBlock.Code -> {
-                    CodeBlockCard(language = block.language, content = block.content)
-                }
-            }
-        }
-
-        if (citations.isNotEmpty()) {
-            Row(
-                modifier = Modifier
-                    .horizontalScroll(rememberScrollState())
-                    .padding(top = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                citations.distinctBy { it.source.url }.forEachIndexed { idx, citation ->
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = AmoledSurface,
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF282828)),
-                        modifier = Modifier.clickable { onOpenUrl(citation.source.url) }
-                    ) {
-                        Text(
-                            text = "[${idx + 1}] ${citation.source.title}",
-                            color = SearchActiveText,
-                            fontSize = 11.sp,
-                            style = DefaultTextStyle,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun CodeBlockCard(language: String, content: String) {
-    val clipboardManager = LocalClipboardManager.current
-    val haptic = LocalHapticFeedback.current
-    var isCopied by remember { mutableStateOf(false) }
-
-    LaunchedEffect(isCopied) {
-        if (isCopied) {
-            kotlinx.coroutines.delay(1500)
-            isCopied = false
-        }
-    }
-
-    val langColor = when (language.lowercase(Locale.US)) {
-        "kotlin", "kt" -> Color(0xFF7F52FF)
-        "python", "py" -> Color(0xFF3776AB)
-        "json", "xml" -> Color(0xFFFFD54F)
-        "sh", "bash" -> Color(0xFF4CAF50)
-        else -> Color(0xFFAAAAAA)
-    }
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(CodeBlockShape)
-            .border(1.dp, Color(0xFF222222), CodeBlockShape),
-        colors = CardDefaults.cardColors(containerColor = CodeBlockBg)
-    ) {
-        Column {
-            DisableSelection {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(CodeBlockHeaderBg)
-                        .padding(horizontal = 14.dp, vertical = 7.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(7.dp)
-                                .clip(CircleShape)
-                                .background(langColor)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = language.ifEmpty { "code" }.uppercase(Locale.US),
-                            color = Color(0xFFAAAAAA),
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            style = DefaultTextStyle
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .clickable {
-                                clipboardManager.setText(AnnotatedString(content))
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                isCopied = true
-                            },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = if (isCopied) Icons.Default.Check else CopyIcon,
-                            contentDescription = "Скопировать",
-                            tint = if (isCopied) Color(0xFF81C784) else Color(0xFFAAAAAA),
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = if (isCopied) "Скопировано" else "Скопировать",
-                            color = if (isCopied) Color(0xFF81C784) else Color(0xFFAAAAAA),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            style = DefaultTextStyle
-                        )
-                    }
-                }
-            }
-
-            Text(
-                text = content,
-                color = Color(0xFFE0E0E0),
-                fontSize = 13.sp,
-                lineHeight = 19.sp,
-                fontFamily = FontFamily.Monospace,
-                style = DefaultTextStyle,
-                modifier = Modifier
-                    .heightIn(max = 360.dp)
-                    .verticalScroll(rememberScrollState())
-                    .horizontalScroll(rememberScrollState())
-                    .padding(14.dp)
-            )
-        }
-    }
-}
-
-private sealed interface MarkdownBlock {
-    data class Header(val level: Int, val text: String) : MarkdownBlock
-    data class Bullet(val content: String) : MarkdownBlock
-    data class NumberedItem(val number: String, val content: String) : MarkdownBlock
-    data class Paragraph(val content: String) : MarkdownBlock
-    data class Code(val language: String, val content: String) : MarkdownBlock
-}
-
-private fun parseMarkdownBlocks(input: String): List<MarkdownBlock> {
-    val blocks = mutableListOf<MarkdownBlock>()
-    val fence = "```"
-    var cursor = 0
-
-    while (cursor < input.length) {
-        val startFence = findFenceIndex(input, cursor)
-        if (startFence == -1) {
-            parseLinesIntoBlocks(input.substring(cursor), blocks)
-            break
-        }
-
-        if (startFence > cursor) {
-            parseLinesIntoBlocks(input.substring(cursor, startFence), blocks)
-        }
-
-        val afterStartFence = startFence + fence.length
-        val langEnd = input.indexOf('\n', afterStartFence)
-        if (langEnd == -1) {
-            val code = input.substring(afterStartFence)
-            blocks.add(MarkdownBlock.Code("", code))
-            break
-        }
-
-        val language = input.substring(afterStartFence, langEnd).trim()
-        val endFence = findFenceIndex(input, langEnd + 1)
-        if (endFence == -1) {
-            val code = input.substring(langEnd + 1)
-            blocks.add(MarkdownBlock.Code(language, code))
-            break
-        }
-
-        val code = input.substring(langEnd + 1, endFence)
-        blocks.add(MarkdownBlock.Code(language, code))
-        cursor = endFence + fence.length
-    }
-    return blocks
-}
-
-private fun findFenceIndex(input: String, fromIndex: Int): Int {
-    var idx = fromIndex
-    while (idx < input.length) {
-        val found = input.indexOf("```", idx)
-        if (found == -1) return -1
-        var checkIdx = found - 1
-        var leadingSpaces = 0
-        while (checkIdx >= 0 && input[checkIdx] == ' ') {
-            checkIdx--
-            leadingSpaces++
-        }
-        if (checkIdx < 0 || input[checkIdx] == '\n') {
-            if (leadingSpaces <= 3) {
-                return found
-            }
-        }
-        idx = found + 3
-    }
-    return -1
-}
-
-private fun parseLinesIntoBlocks(text: String, out: MutableList<MarkdownBlock>) {
-    val lines = text.lines()
-    val paragraphBuffer = StringBuilder()
-
-    fun flushParagraph() {
-        if (paragraphBuffer.isNotEmpty()) {
-            out.add(MarkdownBlock.Paragraph(paragraphBuffer.toString().trim()))
-            paragraphBuffer.setLength(0)
-        }
-    }
-
-    val orderedListRegex = Regex("^(\\d+)\\.\\s+(.*)$")
-
-    for (line in lines) {
-        val trimmed = line.trim()
-        if (trimmed.isEmpty()) {
-            flushParagraph()
-            continue
-        }
-
-        val orderedMatch = orderedListRegex.find(trimmed)
-
-        when {
-            trimmed.startsWith("###### ") -> { flushParagraph(); out.add(MarkdownBlock.Header(6, trimmed.removePrefix("###### ").trim())) }
-            trimmed.startsWith("##### ") -> { flushParagraph(); out.add(MarkdownBlock.Header(5, trimmed.removePrefix("##### ").trim())) }
-            trimmed.startsWith("#### ") -> { flushParagraph(); out.add(MarkdownBlock.Header(4, trimmed.removePrefix("#### ").trim())) }
-            trimmed.startsWith("### ") -> { flushParagraph(); out.add(MarkdownBlock.Header(3, trimmed.removePrefix("### ").trim())) }
-            trimmed.startsWith("## ") -> { flushParagraph(); out.add(MarkdownBlock.Header(2, trimmed.removePrefix("## ").trim())) }
-            trimmed.startsWith("# ") -> { flushParagraph(); out.add(MarkdownBlock.Header(1, trimmed.removePrefix("# ").trim())) }
-            trimmed.startsWith("- ") || trimmed.startsWith("* ") -> {
-                flushParagraph()
-                out.add(MarkdownBlock.Bullet(trimmed.substring(2).trim()))
-            }
-            orderedMatch != null -> {
-                flushParagraph()
-                val num = orderedMatch.groupValues[1]
-                val content = orderedMatch.groupValues[2]
-                out.add(MarkdownBlock.NumberedItem(num, content))
-            }
-            else -> {
-                if (paragraphBuffer.isNotEmpty()) paragraphBuffer.append(" ")
-                paragraphBuffer.append(line.trim())
-            }
-        }
-    }
-    flushParagraph()
-}
-
-private fun parseInlineMarkdown(text: String, onOpenUrl: (String) -> Unit): AnnotatedString {
-    return buildAnnotatedString {
-        var i = 0
-        while (i < text.length) {
-            if (text[i] == '`') {
-                val nextTick = text.indexOf('`', i + 1)
-                if (nextTick != -1) {
-                    val codeSnippet = text.substring(i + 1, nextTick)
-                    withStyle(
-                        SpanStyle(
-                            fontFamily = FontFamily.Monospace,
-                            background = InlineCodeBg,
-                            color = InlineCodeText,
-                            fontSize = 13.sp
-                        )
-                    ) {
-                        append(" $codeSnippet ")
-                    }
-                    i = nextTick + 1
-                    continue
-                }
-            }
-
-            if (text.startsWith("***", i)) {
-                val nextStars = text.indexOf("***", i + 3)
-                if (nextStars != -1) {
-                    val content = text.substring(i + 3, nextStars)
-                    withStyle(SpanStyle(fontWeight = FontWeight.Bold, fontStyle = FontStyle.Italic, color = TextPrimary)) {
-                        append(content)
-                    }
-                    i = nextStars + 3
-                    continue
-                }
-            }
-
-            if (text.startsWith("**", i)) {
-                val nextStars = text.indexOf("**", i + 2)
-                if (nextStars != -1) {
-                    val boldText = text.substring(i + 2, nextStars)
-                    withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = TextPrimary)) {
-                        append(boldText)
-                    }
-                    i = nextStars + 2
-                    continue
-                }
-            }
-
-            if (text[i] == '*') {
-                val hasRightSpace = i + 1 < text.length && text[i + 1].isWhitespace()
-                val nextStar = text.indexOf('*', i + 1)
-                if (!hasRightSpace && nextStar != -1) {
-                    val hasLeftSpace = nextStar - 1 >= 0 && text[nextStar - 1].isWhitespace()
-                    if (!hasLeftSpace) {
-                        val italicText = text.substring(i + 1, nextStar)
-                        withStyle(SpanStyle(fontStyle = FontStyle.Italic, color = TextPrimary)) {
-                            append(italicText)
-                        }
-                        i = nextStar + 1
-                        continue
-                    }
-                }
-            }
-
-            if (text.startsWith("[", i)) {
-                val closeBracket = text.indexOf(']', i + 1)
-                val openParen = if (closeBracket != -1) text.indexOf('(', closeBracket) else -1
-                val closeParen = if (openParen != -1 && openParen == closeBracket + 1) text.indexOf(')', openParen) else -1
-
-                if (closeBracket != -1 && openParen == closeBracket + 1 && closeParen != -1) {
-                    val linkTitle = text.substring(i + 1, closeBracket)
-                    val linkUrl = text.substring(openParen + 1, closeParen).trim()
-
-                    withLink(
-                        LinkAnnotation.Url(
-                            url = linkUrl,
-                            styles = TextLinkStyles(
-                                style = SpanStyle(
-                                    color = SearchActiveText,
-                                    textDecoration = TextDecoration.Underline,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            ),
-                            linkInteractionListener = { _ -> onOpenUrl(linkUrl) }
-                        )
-                    ) {
-                        append(linkTitle)
-                    }
-                    i = closeParen + 1
-                    continue
-                }
-            }
-
-            append(text[i])
-            i++
         }
     }
 }
@@ -1623,9 +1183,7 @@ private fun AttachmentChipsBar(
                     Spacer(modifier = Modifier.width(4.dp))
                     IconButton(
                         onClick = { onRemove(att) },
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .size(28.dp)
+                        modifier = Modifier.size(28.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Close,
@@ -1651,9 +1209,7 @@ private fun FloatingScrollBottomButton(
 ) {
     Surface(
         onClick = onClick,
-        modifier = modifier
-            .minimumInteractiveComponentSize()
-            .size(44.dp),
+        modifier = modifier.size(44.dp),
         shape = CircleShape,
         color = AmoledSurface,
         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF333333)),
@@ -1671,7 +1227,7 @@ private fun FloatingScrollBottomButton(
 }
 
 // ====================================================================
-// Капсула ввода с кнопками Поиска и переключения Уровня Рассуждений
+// Капсула ввода
 // ====================================================================
 
 @Composable
@@ -1715,7 +1271,6 @@ fun ChatGptInputBar(
         // Кнопка вложений (+)
         Box(
             modifier = Modifier
-                .minimumInteractiveComponentSize()
                 .size(40.dp)
                 .clip(CircleShape)
                 .background(AmoledButtonBg)
@@ -1732,10 +1287,9 @@ fun ChatGptInputBar(
 
         Spacer(modifier = Modifier.width(4.dp))
 
-        // Кнопка веб-поиска (Глобус 🌐)
+        // Кнопка поиска Google Search
         Box(
             modifier = Modifier
-                .minimumInteractiveComponentSize()
                 .size(40.dp)
                 .clip(CircleShape)
                 .background(if (enableSearch) SearchActiveBg else AmoledButtonBg)
@@ -1753,7 +1307,7 @@ fun ChatGptInputBar(
         ) {
             Icon(
                 imageVector = GlobeIcon,
-                contentDescription = if (enableSearch) "Веб-поиск включен" else "Веб-поиск выключен",
+                contentDescription = "Веб-поиск",
                 tint = if (enableSearch) SearchActiveText else TextSecondary,
                 modifier = Modifier.size(18.dp)
             )
@@ -1761,17 +1315,16 @@ fun ChatGptInputBar(
 
         Spacer(modifier = Modifier.width(4.dp))
 
-        // Быстрый переключатель уровня рассуждений (LOW / MED / HIGH) прямо в строке ввода
+        // Кнопка селектора уровня рассуждений (LOW / MED / HIGH)
         Box {
             Box(
                 modifier = Modifier
-                    .minimumInteractiveComponentSize()
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(if (thinkingLevel != ThinkingLevel.LOW) Color(0xFF1E1C2B) else AmoledButtonBg)
+                    .background(Color(0xFF1E1C2B))
                     .border(
                         width = 1.dp,
-                        color = if (thinkingLevel != ThinkingLevel.LOW) Color(0xFF5D4BB3) else Color.Transparent,
+                        color = Color(0xFF5D4BB3),
                         shape = CircleShape
                     )
                     .clickable { thinkingMenuExpanded = true },
@@ -1781,17 +1334,14 @@ fun ChatGptInputBar(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    Text(
-                        text = "🧠",
-                        fontSize = 11.sp
-                    )
+                    Text(text = "🧠", fontSize = 11.sp)
                     Text(
                         text = when (thinkingLevel) {
                             ThinkingLevel.HIGH -> "HIGH"
                             ThinkingLevel.MEDIUM -> "MED"
                             ThinkingLevel.LOW -> "LOW"
                         },
-                        color = if (thinkingLevel != ThinkingLevel.LOW) Color(0xFFD3C8FF) else TextSecondary,
+                        color = Color(0xFFD3C8FF),
                         fontSize = 7.sp,
                         fontWeight = FontWeight.Bold,
                         lineHeight = 8.sp,
@@ -1816,7 +1366,7 @@ fun ChatGptInputBar(
                             )
                             Column {
                                 Text("HIGH", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                Text("Глубокий анализ (максимум мыслей)", color = TextSecondary, fontSize = 11.sp)
+                                Text("Глубокий анализ", color = TextSecondary, fontSize = 11.sp)
                             }
                         }
                     },
@@ -1852,7 +1402,7 @@ fun ChatGptInputBar(
                             )
                             Column {
                                 Text("LOW", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                Text("Быстрый ответ (минимальная задержка)", color = TextSecondary, fontSize = 11.sp)
+                                Text("Быстрый ответ", color = TextSecondary, fontSize = 11.sp)
                             }
                         }
                     },
@@ -1866,7 +1416,7 @@ fun ChatGptInputBar(
 
         Spacer(modifier = Modifier.width(6.dp))
 
-        // Поле ввода с плавным собственным скроллом
+        // Поле ввода с поддержкой физических клавиатур (Key.Enter / NumPadEnter)
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -1896,7 +1446,8 @@ fun ChatGptInputBar(
                         }
                     }
                     .onPreviewKeyEvent { event ->
-                        if (event.key == Key.Enter && event.type == KeyEventType.KeyDown) {
+                        val isEnter = event.key == Key.Enter || event.key == Key.NumPadEnter
+                        if (isEnter && event.type == KeyEventType.KeyDown) {
                             if (!event.isShiftPressed && isSendEnabled) {
                                 onSendMessage()
                                 keyboardController?.hide()
@@ -1932,7 +1483,6 @@ fun ChatGptInputBar(
         // Кнопка Отправки / Остановки
         Box(
             modifier = Modifier
-                .minimumInteractiveComponentSize()
                 .size(40.dp)
                 .clip(CircleShape)
                 .background(sendButtonBg)

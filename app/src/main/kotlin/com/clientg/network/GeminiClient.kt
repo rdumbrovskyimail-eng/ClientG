@@ -174,14 +174,14 @@ internal data class ToolDto(
 
 @Serializable
 internal data class GenerationConfigDto(
-    val maxOutputTokens: Int = 8192, // Соответствие официальному лимиту Gemini Flash
+    val maxOutputTokens: Int = 8192,
     @SerialName("thinkingConfig") val thinkingConfig: ThinkingConfigDto
 )
 
 @Serializable
 internal data class ThinkingConfigDto(
     val thinkingLevel: String,
-    val includeThoughts: Boolean = true // Обязательно для стриминга рассуждений
+    val includeThoughts: Boolean = true
 )
 
 @Serializable
@@ -338,7 +338,7 @@ class GeminiClient(
                 maxConnectionsCount = 32
                 endpoint {
                     maxConnectionsPerRoute = 8
-                    pipelineMaxSize = 1 // Отключение pipelining для стабильности SSE
+                    pipelineMaxSize = 1
                     keepAliveTime = 30_000
                     connectTimeout = 15_000
                 }
@@ -354,8 +354,9 @@ class GeminiClient(
             }
 
             install(HttpTimeout) {
-                requestTimeoutMillis = HttpTimeout.INFINITE_TIMEOUT_MS // Без жесткого обрыва стрима
-                socketTimeoutMillis = 180_000 // Таймаут неактивности сокета
+                // В Ktor 3.x константа находится в HttpTimeoutConfig
+                requestTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
+                socketTimeoutMillis = 180_000
                 connectTimeoutMillis = 15_000
             }
         }
@@ -405,7 +406,7 @@ class GeminiClient(
         val startTime = System.currentTimeMillis()
         val endpointUrl = "$BASE_URL/$modelName:streamGenerateContent?alt=sse"
 
-        // 1. Формирование истории диалога с экранированием и сохранением thoughtSignature
+        // 1. Формирование истории диалога
         val rawTurns = ArrayList<ContentDto>(history.size + 1)
         for (msg in history) {
             val historyParts = buildList {
@@ -423,7 +424,7 @@ class GeminiClient(
             }
         }
 
-        // 2. Формирование текущего пользовательского запроса
+        // 2. Формирование текущего хода
         val currentParts = buildList {
             attachments.forEach { att ->
                 val safeName = escapeXmlAttribute(att.fileName)
@@ -444,12 +445,12 @@ class GeminiClient(
         }
         rawTurns.add(ContentDto(role = ChatRole.USER.apiValue, parts = currentParts))
 
-        // 3. Отсечение ведущих сообщений модели в начале диалога
+        // 3. Отсечение ведущих сообщений модели
         while (rawTurns.isNotEmpty() && rawTurns.first().role != ChatRole.USER.apiValue) {
             rawTurns.removeAt(0)
         }
 
-        // 4. Склеивание подряд идущих ходов с одинаковой ролью
+        // 4. Склеивание сообщений с одинаковой ролью
         val sanitizedContents = ArrayList<ContentDto>(rawTurns.size)
         for (turn in rawTurns) {
             val last = sanitizedContents.lastOrNull()
@@ -557,7 +558,6 @@ class GeminiClient(
                 suspend fun processCompleteSsePayload(dataPayload: String) {
                     if (dataPayload.isEmpty() || dataPayload == "[DONE]") return
 
-                    // Изолированная десериализация (сохраняет Exception Transparency для emit)
                     val chunk = try {
                         json.decodeFromString(GeminiResponseChunk.serializer(), dataPayload)
                     } catch (_: SerializationException) {
@@ -606,7 +606,6 @@ class GeminiClient(
                         }
                     }
 
-                    // Обработка Google Search Grounding с безопасным маппингом индексов
                     candidate?.groundingMetadata?.let { meta ->
                         meta.webSearchQueries?.let { queries ->
                             val newQueries = queries.filter { discoveredQueries.add(it) }
@@ -679,7 +678,6 @@ class GeminiClient(
                         }
                     }
 
-                    // Разделение мыслей, текста и захват thoughtSignature
                     candidate?.content?.parts?.forEach { part ->
                         part.thoughtSignature?.let { signature ->
                             if (signature.isNotBlank()) {
@@ -712,7 +710,6 @@ class GeminiClient(
                         }
                     }
 
-                    // Метаданные токенов
                     chunk.usageMetadata?.let { usage ->
                         val cached = usage.cachedContentTokenCount
                         val promptTotal = usage.promptTokenCount
